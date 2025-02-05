@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_forcemanager_api,access_forcemanager_api,model_forcemanager_api,base.group_system,1,1,1,1
+access_odoo_to_forcemanager,access_odoo_to_forcemanager,model_odoo_to_forcemanager,base.group_system,1,1,1,1
+access_forcemanager_to_odoo,access_forcemanager_to_odoo,model_forcemanager_to_odoo,base.group_system,1,1,1,1

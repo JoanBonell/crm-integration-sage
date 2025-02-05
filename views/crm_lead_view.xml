@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_crm_lead_form_inherit_forcemanager" model="ir.ui.view">
+        <field name="name">crm.lead.form.forcemanager.inherit</field>
+        <field name="model">crm.lead</field>
+        <field name="inherit_id" ref="crm.crm_lead_view_form"/>
+        <field name="arch" type="xml">
+            <!-- Ejemplo: Añadir debajo de la probabilidad -->
+            <xpath expr="//field[@name='tag_ids']" position="after">
+                <separator string="ForceManager Info"/>
+                <field name="forcemanager_opportunity_id" string="FM Opportunity ID" readonly="1"/>
+                <field name="forcemanager_salesrep_id" string="FM SalesRep ID" readonly="1"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

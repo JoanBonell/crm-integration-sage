@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="view_order_form_inherit_forcemanager" model="ir.ui.view">
+        <field name="name">sale.order.form.forcemanager.inherit</field>
+        <field name="model">sale.order</field>
+        <!-- 
+            IMPORTANTE: Revisa el "inherit_id" para Odoo 15, 16, etc.
+            Suele ser "sale.view_order_form", pero puede variar según la versión.
+        -->
+        <field name="inherit_id" ref="sale.view_order_form"/>
+        <field name="arch" type="xml">
+            <!-- 
+                Insertar justo después del campo "note".
+                Puedes cambiar a otro "xpath expr" para ubicarlo en otro lugar.
+            -->
+            <xpath expr="//field[@name='note']" position="after">
+                <separator string="Datos ForceManager"/>
+
+                <!-- 
+                    Agrupamos en un <group> para que se vean bonitos en 2 columnas. 
+                    O puedes ponerlos sueltos con <field/>.
+                -->
+                <group>
+                    <field name="forcemanager_id" string="ForceManager ID" readonly="1"/>
+                    <field name="forcemanager_status" string="FM Status" readonly="1"/>
+                    <field name="synced_with_forcemanager" string="FM Synced" readonly="1"/>
+                    <field name="x_entrega_mismo_comercial" string="FM Entrega mismo comercial" readonly="1"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>

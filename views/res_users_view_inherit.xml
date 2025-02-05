@@ -1,0 +1,15 @@
+<!-- views/res_users_view_inherit.xml -->
+<odoo>
+    <record id="view_users_form_inherit_forcemanager" model="ir.ui.view">
+        <field name="name">res.users.form.inherit.forcemanager</field>
+        <field name="model">res.users</field>
+        <field name="inherit_id" ref="base.view_users_form"/>
+        <field name="arch" type="xml">
+            <!--  Insertamos el campo despues de 'name' -->
+            <xpath expr="//field[@name='signature']" position="after">
+                <separator string="ForceManager ID"/>
+                <field name="forcemanager_id" string="ForceManager ID" readonly="1"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
