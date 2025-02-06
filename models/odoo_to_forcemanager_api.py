@@ -20,10 +20,10 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         # Llamamos solamente a sync_products(), por ejemplo.
         # (Descomenta las otras si quieres sincronizarlas)
-        self.sync_accounts()
-        self.sync_contacts()
-        #self.sync_products()
-        self.sync_opportunities()
+        #self.sync_accounts()
+        #self.sync_contacts()
+        self.sync_products()
+        #self.sync_opportunities()
         #self.sync_orders()
 
         _logger.info("<<< [OdooToForceManagerAPI] action_sync_to_forcemanager() END")
@@ -178,7 +178,15 @@ class OdooToForceManagerAPI(models.TransientModel):
     def sync_products(self):
         """
         Envía los productos a ForceManager usando /products/bulk (si existe),
-        o fallback 1x1. Incluye la triple OR: write_date > last_sync, forcemanager_id=False, synced_with_forcemanager=False.
+        o fallback 1x1. Incluye la triple OR:
+        - (A) write_date > last_sync
+        - (B) forcemanager_id=False
+        - (C) synced_with_forcemanager=False
+        para detectar los productos que deben subirse/actualizarse.
+
+        Se actualiza y envía el stock (product.qty_available) a ForceManager,
+        y se envía 'description_sale' como 'description', que es lo que
+        ForceManager espera y lo que luego recibimos en forcemanager_to_odoo_api.
         """
         _logger.info("[sync_products] Iniciando envío de productos a ForceManager.")
         last_sync = self._get_last_sync_date('products')
@@ -242,6 +250,7 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         self._update_last_sync_date('products')
         _logger.info("[sync_products] Sincronización de productos finalizada.")
+
 
 
     # -------------------------------------------------------------------------
@@ -561,33 +570,48 @@ class OdooToForceManagerAPI(models.TransientModel):
     def _prepare_single_product_payload_bulk(self, product, is_create=True):
         """
         Construye el 'data' para la exportación en /products/bulk (POST/PUT).
+        Enviamos:
+        - model => product.name
+        - description => product.description_sale
+        - price => product.list_price
+        - cost => product.standard_price
+        - categoryId => int(product.categ_id.forcemanager_id) si existe
+        - stock => product.qty_available
         """
         cat_id = False
         if product.categ_id and product.categ_id.forcemanager_id:
             try:
                 cat_id = int(product.categ_id.forcemanager_id)
             except ValueError:
-                pass
+                cat_id = False
 
         data_obj = {}
         if not is_create and product.forcemanager_id:
-            data_obj['id'] = int(product.forcemanager_id)
+            # ForceManager exige mandar "id" como int
+            try:
+                data_obj['id'] = int(product.forcemanager_id)
+            except ValueError:
+                data_obj['id'] = 0  # en caso extremo
 
         data_obj.update({
             "extId": str(product.id),
             "model": product.name or "(Sin nombre)",
-            "description": product.description or "",
+            # Usamos description_sale para que coincida con lo que recibimos del otro lado
+            "description": product.description_sale or "",
             "price": product.list_price or 0.0,
             "cost": product.standard_price or 0.0,
             "maxDiscount": 0,
             "permissionLevel": 2,
+            # Enviamos el stock disponible
             "stock": product.qty_available or 0.0,
             "notAvailable": False,
             "readOnly": False,
         })
         if cat_id:
             data_obj["categoryId"] = cat_id
+
         return data_obj
+
 
     # -------------------------------------------------------------------------
     # ENDPOINT DETECTION & RESPONSES

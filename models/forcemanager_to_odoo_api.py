@@ -794,14 +794,15 @@ class ForceManagerToOdooAPI(models.TransientModel):
     
     def sync_products(self):
         """
-        Descarga products desde ForceManager y los crea/actualiza en Odoo.
-        Incluye asignación de categoría y un campo custom de stock (ej. x_forcemanager_stock).
+        Descarga products desde ForceManager y ACTUALIZA en Odoo únicamente
+        los que ya existan (basados en forcemanager_id).
+        No crea productos nuevos ni modifica stock en Odoo.
 
         - model => name
         - price => list_price
         - cost => standard_price
         - categoryId => se busca en product.category.forcemanager_id
-        - stock => x_forcemanager_stock
+        - Se ignora cualquier 'stock' que llegue de FM.
         """
         _logger.info(">>> [sync_products] Iniciando sincronización de productos (products)")
 
@@ -837,68 +838,61 @@ class ForceManagerToOdooAPI(models.TransientModel):
             except ValueError:
                 fm_prod_id = 0
 
+            # 1) Buscamos el producto existente en Odoo
             product = ProductObj.search([('forcemanager_id', '=', fm_prod_id)], limit=1)
+            if not product:
+                # No creamos productos nuevos
+                _logger.info("[sync_products] (FM ID=%s) No existe en Odoo => se omite la creación.", fm_prod_id)
+                continue
 
-            # Campos relevantes
+            # 2) Campos relevantes (ignoramos 'stock', solo tomamos model, description, price, cost, categoryId)
             model_value = fm_prod.get('model') or ""
             desc_value = fm_prod.get('description') or ""
             price_value = fm_prod.get('price', 0.0)
             cost_value = fm_prod.get('cost', 0.0)
-            stock_value = fm_prod.get('stock', 0.0)  # si ForceManager envía "stock"
+            # fm_prod.get('stock') se ignora
 
             # Nombre del producto
             name = model_value.strip() or desc_value.strip() or "(Sin nombre)"
 
-            # Categoría
+            # 3) Determinamos la categoría
             fm_cat_obj = fm_prod.get('categoryId')
-            categ_id = False
+            categ_id = product.categ_id.id  # Mantenemos la categoría actual si no hay match
             if isinstance(fm_cat_obj, int):
-                # A veces FM envía categoryId como entero directo
+                # ForceManager puede enviar categoryId como int directo
                 cat_str = str(fm_cat_obj)
                 existing_cat = CategoryObj.search([('forcemanager_id', '=', cat_str)], limit=1)
                 if existing_cat:
                     categ_id = existing_cat.id
             elif isinstance(fm_cat_obj, dict):
-                # Otras veces es un objeto {"id": 12, "value": "..."}
+                # Otras veces es un objeto {"id": 12, "value": "..."}, comprobamos id
                 raw_id = fm_cat_obj.get('id')
                 if raw_id:
                     cat_str = str(raw_id)
-                    existing_cat = CategoryObj.search([('forcemanager_id','=', cat_str)], limit=1)
+                    existing_cat = CategoryObj.search([('forcemanager_id', '=', cat_str)], limit=1)
                     if existing_cat:
                         categ_id = existing_cat.id
                     else:
-                        # crear cat mínima
-                        cat_name = fm_cat_obj.get('value') or "Unknown FM Category"
-                        new_cat = CategoryObj.create({
-                            'name': cat_name,
-                            'forcemanager_id': cat_str
-                        })
-                        categ_id = new_cat.id
-                        _logger.info("[sync_products] Creada category '%s' (FM ID=%s).", cat_name, cat_str)
+                        _logger.info("[sync_products] Category FM ID=%s no se encuentra en Odoo => se omite.", cat_str)
 
+            # 4) Construimos los vals para actualizar en Odoo
             vals = {
-                'forcemanager_id': fm_prod_id,
                 'name': name,
                 'list_price': price_value,
                 'standard_price': cost_value,
                 'synced_with_forcemanager': True,
-                # Ejemplo de campo custom
-                'x_forcemanager_stock': stock_value,
+                'categ_id': categ_id,
             }
             if desc_value:
                 vals['description_sale'] = desc_value
-            if categ_id:
-                vals['categ_id'] = categ_id
 
-            if product:
-                _logger.info("[sync_products] Actualizando product.product ID=%d (FM ID=%s)", product.id, fm_prod_id)
-                product.with_context(sync_from_forcemanager=True).write(vals)
-            else:
-                _logger.info("[sync_products] Creando product.product (FM ID=%s)", fm_prod_id)
-                ProductObj.with_context(sync_from_forcemanager=True).create(vals)
+            _logger.info("[sync_products] Actualizando product.product ID=%d (FM ID=%s)", product.id, fm_prod_id)
+            # Use context to avoid triggering re-sync logic
+            product.with_context(sync_from_forcemanager=True).write(vals)
 
         self._update_last_sync_date('products')
         _logger.info("<<< [sync_products] Finalizada la sincronización de productos.")
+
 
 
 
