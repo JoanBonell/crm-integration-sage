@@ -20,11 +20,11 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         # Llamamos solamente a sync_products(), por ejemplo.
         # (Descomenta las otras si quieres sincronizarlas)
-        #self.sync_accounts()
-        #self.sync_contacts()
+        self.sync_accounts()
+        self.sync_contacts()
         self.sync_products()
-        #self.sync_opportunities()
-        #self.sync_orders()
+        self.sync_opportunities()
+        self.sync_orders()
 
         _logger.info("<<< [OdooToForceManagerAPI] action_sync_to_forcemanager() END")
 
@@ -321,6 +321,14 @@ class OdooToForceManagerAPI(models.TransientModel):
     # ORDERS (sale.order)
     # -------------------------------------------------------------------------
     def sync_orders(self):
+        """
+        Envía pedidos (sale.order) de Odoo a ForceManager:
+        - Filtra por triple OR (write_date > last_sync, forcemanager_id=False, synced_with_forcemanager=False)
+        - Separa en pedidos a CREAR (POST /sales) o ACTUALIZAR (PUT /sales/{id})
+        - Usa forcemanager_id en sale.order para enlazar
+        - Envía 'x_entrega_mismo_comercial' => 'Z_Entrega_mismo_comercial' ("Si"/"No")
+        - Envía 'forcemanager_status' => 'status' si lo deseas
+        """
         _logger.info("[sync_orders] Iniciando envío de 'orders' a FM.")
         last_sync_date = self._get_last_sync_date('orders')
         domain = self._build_domain_for_odoo2fm(last_sync_date)
@@ -380,6 +388,80 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         self._update_last_sync_date('orders')
         _logger.info("[sync_orders] Finalizada la sincronización de pedidos.")
+
+
+    def _prepare_single_order_payload(self, so, is_create=True):
+        """
+        Construye el payload para un 'sale.order' => ForceManager 'sales'.
+        - Mapeamos 'forcemanager_status' => 'status'
+        - Mapeamos 'x_entrega_mismo_comercial' => 'Z_Entrega_mismo_comercial'
+        - Si la orden está en estado cancel => 'deleted': True (opcional)
+        """
+        data = {}
+        if not is_create and so.forcemanager_id:
+            data['id'] = so.forcemanager_id
+
+        # 1) Identificar la cuenta
+        fm_account_id = None
+        if so.partner_id and so.partner_id.forcemanager_id:
+            fm_account_id = {'id': so.partner_id.forcemanager_id, 'value': so.partner_id.name}
+
+        # 2) Moneda
+        currency_val = {'value': so.currency_id.name} if so.currency_id else None
+
+        # 3) Comercial
+        fm_salesrep = None
+        if so.user_id and so.user_id.forcemanager_id:
+            fm_salesrep = {'id': so.user_id.forcemanager_id, 'value': so.user_id.name}
+
+        # 4) Líneas
+        lines_payload = []
+        for line in so.order_line:
+            fm_prod_id = ""
+            if line.product_id and line.product_id.forcemanager_id:
+                fm_prod_id = line.product_id.forcemanager_id
+            lines_payload.append({
+                'productId': fm_prod_id,
+                'productName': line.name or "",
+                'quantity': line.product_uom_qty,
+                'unitPrice': line.price_unit,
+            })
+
+        # 5) dateCreated => so.date_order
+        fm_date_str = ""
+        if so.date_order:
+            fm_date_str = fields.Datetime.to_string(so.date_order).replace(" ", "T") + "Z"
+
+        # 6) forcemanager_status => 'status'
+        fm_status = so.forcemanager_status or ""
+
+        # 7) x_entrega_mismo_comercial => "Z_Entrega_mismo_comercial"
+        entrega_str = ""
+        if so.x_entrega_mismo_comercial == 'si':
+            entrega_str = "Si"
+        elif so.x_entrega_mismo_comercial == 'no':
+            entrega_str = "No"
+
+        # 8) Mark 'deleted' if Odoo is canceled (opcional)
+        #    Si deseas que al cancelar en Odoo, se elimine en ForceManager, haz:
+        is_deleted = (so.state == 'cancel')
+
+        # 9) Construir data
+        data.update({
+            'accountId': fm_account_id,
+            'currencyId': currency_val,
+            'salesRepId': fm_salesrep,
+            'dateCreated': fm_date_str or None,
+            'lines': lines_payload,
+
+            # Campos custom
+            'status': fm_status,                     # Forcemanager status
+            'Z_Entrega_mismo_comercial': entrega_str, # "Si"/"No"
+            'deleted': is_deleted,                   # Si está cancelado en Odoo => se marca en FM
+        })
+
+        return data
+
 
     # -------------------------------------------------------------------------
     # AUXILIARES DE DOMAIN
@@ -523,49 +605,6 @@ class OdooToForceManagerAPI(models.TransientModel):
         if lead.date_deadline:
             payload['salesForecastDate'] = f"{lead.date_deadline}T00:00:00Z"
         return payload
-
-    def _prepare_single_order_payload(self, so, is_create=True):
-        """
-        Payload para un 'sale.order' => ForceManager 'sales'.
-        """
-        data = {}
-        if not is_create and so.forcemanager_id:
-            data['id'] = so.forcemanager_id
-
-        fm_account_id = None
-        if so.partner_id and so.partner_id.forcemanager_id:
-            fm_account_id = {'id': so.partner_id.forcemanager_id, 'value': so.partner_id.name}
-
-        currency_val = {'value': so.currency_id.name} if so.currency_id else None
-
-        fm_salesrep = None
-        if so.user_id and so.user_id.forcemanager_id:
-            fm_salesrep = {'id': so.user_id.forcemanager_id, 'value': so.user_id.name}
-
-        lines_payload = []
-        for line in so.order_line:
-            fm_prod_id = ""
-            if line.product_id and line.product_id.forcemanager_id:
-                fm_prod_id = line.product_id.forcemanager_id
-            lines_payload.append({
-                'productId': fm_prod_id,
-                'productName': line.name or "",
-                'quantity': line.product_uom_qty,
-                'unitPrice': line.price_unit,
-            })
-
-        fm_date_str = ""
-        if so.date_order:
-            fm_date_str = fields.Datetime.to_string(so.date_order).replace(" ", "T") + "Z"
-
-        data.update({
-            'accountId': fm_account_id,
-            'currencyId': currency_val,
-            'salesRepId': fm_salesrep,
-            'dateCreated': fm_date_str or None,
-            'lines': lines_payload,
-        })
-        return data
 
     def _prepare_single_product_payload_bulk(self, product, is_create=True):
         """

@@ -17,11 +17,11 @@ class ForceManagerToOdooAPI(models.TransientModel):
         """
         _logger.info(">>> [ForceManagerToOdooAPI] action_sync_from_forcemanager() START")
 
-        #self.sync_accounts()
-        #self.sync_contacts()
-        #self.sync_opportunities()
+        self.sync_accounts()
+        self.sync_contacts()
+        self.sync_opportunities()
         self.sync_products()
-        #self.sync_orders() REVISAR DEMÀ QUAN FUNCIONI PRODUCTS
+        self.sync_orders() 
         
         _logger.info("<<< [ForceManagerToOdooAPI] action_sync_from_forcemanager() END")
 
@@ -184,14 +184,23 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'forcemanager_country': fm_country_str,
             }
 
+            #if partner:
+            #    _logger.info("[sync_accounts] Actualizando partner %d (FM ID=%s)", partner.id, fm_id)
+            #    partner.write(vals)
+            #else:
+            #    _logger.info("[sync_accounts] Creando nuevo partner (FM ID=%s)", fm_id)
+            #    partner = self.env['res.partner'].create(vals)
+
             if partner:
                 _logger.info("[sync_accounts] Actualizando partner %d (FM ID=%s)", partner.id, fm_id)
-                partner.write(vals)
+                partner.with_context(sync_from_forcemanager=True).write(vals)
             else:
                 _logger.info("[sync_accounts] Creando nuevo partner (FM ID=%s)", fm_id)
-                partner = self.env['res.partner'].create(vals)
+                partner = self.env['res.partner'].with_context(sync_from_forcemanager=True).create(vals)
 
-            partner.synced_with_forcemanager = True
+            # Y acto seguido, para marcarlo como sincronizado:
+            partner.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
+
 
             # =====================================================================
             # 5) CREAR CONTACTO HIJO (si viene Z_Nombre_persona_de_contacto)
@@ -224,10 +233,10 @@ class ForceManagerToOdooAPI(models.TransientModel):
 
                 if existing_contact:
                     _logger.info("[sync_accounts] Actualizando contacto hijo %d '%s'", existing_contact.id, z_contact_name)
-                    existing_contact.write(contact_vals)
+                    existing_contact.with_context(sync_from_forcemanager=True).write(contact_vals)
                 else:
                     _logger.info("[sync_accounts] Creando contacto hijo '%s' para la cuenta %d", z_contact_name, partner.id)
-                    self.env['res.partner'].create(contact_vals)
+                    self.env['res.partner'].with_context(sync_from_forcemanager=True).create(contact_vals)
 
         # Guardar fecha de sync final
         self._update_last_sync_date('accounts')
@@ -421,15 +430,25 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'state_id': state_id,
             }
 
-            if partner:
-                _logger.info("[sync_contacts] Actualizando partner %d (FM ID=%s)", partner.id, fm_id)
-                partner.write(vals)
-            else:
-                _logger.info("[sync_contacts] Creando nuevo partner (FM ID=%s)", fm_id)
-                partner = self.env['res.partner'].create(vals)
+            #if partner:
+            #    _logger.info("[sync_contacts] Actualizando partner %d (FM ID=%s)", partner.id, fm_id)
+            #    partner.write(vals)
+            #else:
+            #    _logger.info("[sync_contacts] Creando nuevo partner (FM ID=%s)", fm_id)
+            #    partner = self.env['res.partner'].create(vals)
 
-            partner.synced_with_forcemanager = True
             _logger.info("[sync_contacts] partner.id=%d procesado correctamente.", partner.id)
+            
+            if partner:
+                _logger.info("[sync_accounts] Actualizando partner %d (FM ID=%s)", partner.id, fm_id)
+                partner.with_context(sync_from_forcemanager=True).write(vals)
+            else:
+                _logger.info("[sync_accounts] Creando nuevo partner (FM ID=%s)", fm_id)
+                partner = self.env['res.partner'].with_context(sync_from_forcemanager=True).create(vals)
+
+        # Y acto seguido, para marcarlo como sincronizado:
+        partner.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
+
 
         self._update_last_sync_date('contacts')
         _logger.info("<<< [sync_contacts] Finalizada la sincronización de contactos.")
@@ -595,13 +614,13 @@ class ForceManagerToOdooAPI(models.TransientModel):
             # 12) Crear o actualizar la Oportunidad (crm.lead)
             if lead:
                 _logger.info("[sync_opportunities] Actualizando crm.lead ID=%d (FM Opp ID=%s)", lead.id, fm_opp_id)
-                lead.write(vals)
+                lead.with_context(sync_from_forcemanager=True).write(vals)
             else:
                 _logger.info("[sync_opportunities] Creando nuevo crm.lead (FM Opp ID=%s)", fm_opp_id)
-                lead = self.env['crm.lead'].create(vals)
+                lead = self.env['crm.lead'].with_context(sync_from_forcemanager=True).create(vals)
 
             # 13) Marcar la oportunidad como sincronizada
-            lead.synced_with_forcemanager = True
+            lead.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
             _logger.info("[sync_opportunities] lead.id=%d procesada con éxito.", lead.id)
 
         # 14) Actualizar fecha de última sincronización
@@ -616,11 +635,11 @@ class ForceManagerToOdooAPI(models.TransientModel):
     def sync_orders(self):
         """
         Sincroniza los 'Sales' (pedidos) de ForceManager con los pedidos (sale.order) de Odoo.
-        Maneja también las líneas (sale.order.line), direcciones de entrega/factura, etc.
-        
-        Además:
-        - Si ForceManager manda 'deleted: true' o 'dateDeleted', anulamos el pedido en Odoo.
-        - Leemos 'Z_Entrega_mismo_comercial' (Si/No) y lo guardamos en x_entrega_mismo_comercial.
+        - Localiza cada pedido por forcemanager_id
+        - Crea o actualiza en Odoo
+        - Maneja 'deleted' y 'dateDeleted' para cancelar el pedido en Odoo
+        - Lee 'Z_Entrega_mismo_comercial' ("Si"/"No") y lo guarda en x_entrega_mismo_comercial ('si'/'no')
+        - Guarda el campo 'status' de ForceManager en forcemanager_status (si existe)
         """
         _logger.info(">>> [sync_orders] Iniciando sincronización de pedidos (orders)")
 
@@ -653,14 +672,14 @@ class ForceManagerToOdooAPI(models.TransientModel):
             except ValueError:
                 fm_id_int = 0
 
-            # 1) Buscar si ya existe el pedido en Odoo
+            # 1) Buscar si ya existe el pedido en Odoo por forcemanager_id
             order = self.env['sale.order'].search([('forcemanager_id', '=', fm_id_int)], limit=1)
 
             # 2) Revisar si ForceManager marcó 'deleted' => anular pedido en Odoo
             is_deleted = fm_order.get('deleted') is True
             date_deleted = fm_order.get('dateDeleted')  # p.ej. "2025-01-31T10:00:00Z"
             if is_deleted or date_deleted:
-                if order and order.state not in ('cancel','done'):
+                if order and order.state not in ('cancel', 'done'):
                     _logger.info("[sync_orders] FM Order ID=%s está 'deleted'. Cancelando en Odoo.", fm_id_int)
                     order.action_cancel()
                 continue  # No crear/actualizar más
@@ -710,28 +729,29 @@ class ForceManagerToOdooAPI(models.TransientModel):
                     user_id = user_rec.id
                 # Si quieres crear usuario si no existe, replica la lógica de sync_accounts()
 
-            # 7) NUEVO: Leer el campo 'Z_Entrega_mismo_comercial'
-            # En ForceManager => "Si" o "No"
+            # 7) Campo 'Z_Entrega_mismo_comercial' => x_entrega_mismo_comercial
             fm_entrega = fm_order.get('Z_Entrega_mismo_comercial')  # "Si" / "No"
-            # Convertimos a la selection de Odoo => 'si' / 'no'
             x_entrega = False
             if fm_entrega == "Si":
                 x_entrega = 'si'
             elif fm_entrega == "No":
                 x_entrega = 'no'
 
-            # 8) Montar los vals para sale.order
+            # 8) forcemanager_status si lo manda ForceManager
+            fm_status = fm_order.get('status') or ""  # Ajusta la clave si es otra
+
+            # 9) Montar los vals para sale.order
             vals_order = {
                 'forcemanager_id': fm_id_int,
                 'partner_id': partner_id,
                 'date_order': date_order,
                 'currency_id': currency_id,
                 'user_id': user_id,
-                # Direcciones => Ejemplo simplificado (igual invoice=shipping=partner)
                 'partner_invoice_id': partner_id,
                 'partner_shipping_id': partner_id,
-                # El nuevo campo
                 'x_entrega_mismo_comercial': x_entrega,
+                # Guardamos el status si lo provee FM
+                'forcemanager_status': fm_status,
             }
 
             if order:
@@ -741,25 +761,25 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 _logger.info("[sync_orders] Creando nuevo sale.order (FM ID=%s)", fm_id_int)
                 order = self.env['sale.order'].create(vals_order)
 
-            # 9) Manejar líneas del pedido
+            # 10) Manejar líneas del pedido
             fm_lines = fm_order.get('lines', [])
             self._sync_order_lines(order, fm_lines)
 
-            # 10) Marcamos como sincronizado
+            # 11) Marcamos como sincronizado
             order.synced_with_forcemanager = True
             _logger.info("[sync_orders] sale.order.id=%d procesado con éxito.", order.id)
 
-        # 11) Actualizamos fecha de última sincronización
+        # 12) Actualizar fecha de última sincronización
         self._update_last_sync_date('orders')
         _logger.info("<<< [sync_orders] Finalizada la sincronización de pedidos.")
-        
-        
+
+
     def _sync_order_lines(self, order, fm_lines):
         """
         Crea/actualiza líneas del pedido segun la info de ForceManager.
         Ejemplo: si no tienes forcemanager_line_id, puedes hacer un "borrar y crear"
         """
-        # Enfoque sencillo: borramos y creamos
+        # Enfoque sencillo: borramos y creamos todas las líneas
         order.order_line.unlink()
 
         for line_data in fm_lines:
@@ -776,9 +796,9 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'product_uom_qty': quantity,
                 'price_unit': price_unit,
                 'name': product_name,
-                # 'forcemanager_line_id': line_data.get('id'),
-            }
-            self.env['sale.order.line'].create(line_vals)
+        }
+        self.env['sale.order.line'].create(line_vals)
+
 
     def _find_odoo_product_by_fm_id(self, fm_prod_id):
         """Busca product.product con forcemanager_id=fm_prod_id"""
@@ -892,17 +912,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
 
         self._update_last_sync_date('products')
         _logger.info("<<< [sync_products] Finalizada la sincronización de productos.")
-
-
-
-
-
-
-
-    
-
-
-
+        
     # -------------------------------------------------------------------------
     # Auxiliares
     # -------------------------------------------------------------------------

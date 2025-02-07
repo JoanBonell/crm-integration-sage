@@ -24,10 +24,8 @@ class CrmLead(models.Model):
 
     def write(self, vals):
         res = super(CrmLead, self).write(vals)
-
         if not self.env.context.get('sync_from_forcemanager'):
-            # Solo si antes estaban True
             self.filtered(lambda l: l.synced_with_forcemanager).write({'synced_with_forcemanager': False})
-            _logger.info("[CrmLead] Marcados como 'no sincronizados' tras update.")
         return res
+
     

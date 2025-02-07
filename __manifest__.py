@@ -1,5 +1,5 @@
 {
-    'name': 'ForceManager Integration',
+    'name': 'ForceManager Integration v2',
     'version': '15.0.1.0.0',
     'category': 'Sales/CRM',
     'summary': 'Integración bidireccional con ForceManager',
