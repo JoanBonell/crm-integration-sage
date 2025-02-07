@@ -645,15 +645,19 @@ class ForceManagerToOdooAPI(models.TransientModel):
 
         last_sync = self._get_last_sync_date('orders')
         if not last_sync:
-            date_filter_str = '2025-01-01T00:00:00Z'
+            # Si nunca se ha sincronizado antes, partimos de una fecha fija
+            date_updated_str = '2025-01-01T00:00:00Z'
         else:
+            # Convertimos el campo de tipo datetime de Odoo a la cadena con 'T' y sufijo 'Z'
             tmp = fields.Datetime.to_string(last_sync)
-            date_filter_str = tmp.replace(' ', 'T') + 'Z'
+            date_updated_str = tmp.replace(' ', 'T') + 'Z'
 
+        # Aquí usamos date_updated_str en el filtro con 'gt' (greater than)
         where_clause = f"(dateUpdated gt '{date_updated_str}' OR dateCreated gt '{date_updated_str}')"
         endpoint_url = f"sales?where={where_clause}"
         _logger.info("[sync_orders] GET /api/v4/%s", endpoint_url)
 
+        # Petición a ForceManager
         response = self.env['forcemanager.api']._perform_request(endpoint_url, method='GET')
         if not response:
             _logger.warning("[sync_orders] Respuesta vacía o error. Abortando.")
@@ -750,7 +754,6 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'partner_invoice_id': partner_id,
                 'partner_shipping_id': partner_id,
                 'x_entrega_mismo_comercial': x_entrega,
-                # Guardamos el status si lo provee FM
                 'forcemanager_status': fm_status,
             }
 
@@ -772,6 +775,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
         # 12) Actualizar fecha de última sincronización
         self._update_last_sync_date('orders')
         _logger.info("<<< [sync_orders] Finalizada la sincronización de pedidos.")
+
 
 
     def _sync_order_lines(self, order, fm_lines):
