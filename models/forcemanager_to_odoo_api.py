@@ -38,7 +38,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
             tmp = fields.Datetime.to_string(last_sync)
             date_updated_str = tmp.replace(' ', 'T') + 'Z'
 
-        where_clause = f"(dateUpdated gt '{date_updated_str}' OR dateCreated gt '{date_updated_str}')"
+        where_clause = f"(dateUpdated > '{date_updated_str}' OR dateCreated > '{date_updated_str}')"
         endpoint_url = f"accounts?where={where_clause}"
         _logger.info("[sync_accounts] GET /api/v4/%s", endpoint_url)
 
@@ -260,7 +260,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
             tmp = fields.Datetime.to_string(last_sync)
             date_updated_str = tmp.replace(' ', 'T') + 'Z'
 
-        where_clause = f"(dateUpdated gt '{date_updated_str}' OR dateCreated gt '{date_updated_str}')"
+        where_clause = f"(dateUpdated > '{date_updated_str}' OR dateCreated > '{date_updated_str}')"
         endpoint_url = f"contacts?where={where_clause}"
         _logger.info("[sync_contacts] GET /api/v4/%s", endpoint_url)
 
@@ -652,9 +652,10 @@ class ForceManagerToOdooAPI(models.TransientModel):
             tmp = fields.Datetime.to_string(last_sync)
             date_updated_str = tmp.replace(' ', 'T') + 'Z'
 
-        # Aquí usamos date_updated_str en el filtro con 'gt' (greater than)
-        where_clause = f"(dateUpdated gt '{date_updated_str}' OR dateCreated gt '{date_updated_str}')"
-        endpoint_url = f"sales?where={where_clause}"
+        # Aquí usamos date_updated_str en el filtro con '>' (greater than)
+        where_clause = f"(dateUpdated > '{date_updated_str}' OR dateCreated > '{date_updated_str}')"
+        endpoint_url = f"salesorders?where={where_clause}"
+        #endpoint_url = f"salesorders"
         _logger.info("[sync_orders] GET /api/v4/%s", endpoint_url)
 
         # Petición a ForceManager
@@ -837,7 +838,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
             tmp = fields.Datetime.to_string(last_sync)
             date_updated_str = tmp.replace(' ', 'T') + 'Z'
 
-        where_clause = f"(dateUpdated gt '{date_updated_str}' OR dateCreated gt '{date_updated_str}')"
+        where_clause = f"(dateUpdated > '{date_updated_str}' OR dateCreated > '{date_updated_str}')"
         endpoint_url = f"products?where={where_clause}"
         _logger.info("[sync_products] GET /api/v4/%s", endpoint_url)
 
