@@ -20,7 +20,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
         self.sync_accounts()
         self.sync_contacts()
         self.sync_opportunities()
-        self.sync_products()
+        #self.sync_products()
         self.sync_orders() 
         
         _logger.info("<<< [ForceManagerToOdooAPI] action_sync_from_forcemanager() END")
@@ -633,119 +633,134 @@ class ForceManagerToOdooAPI(models.TransientModel):
     # ORDERS
     # -------------------------------------------------------------------------
     def sync_orders(self):
-        """
-        Sincroniza los 'Sales' (pedidos) de ForceManager con los pedidos (sale.order) de Odoo.
-        - Localiza cada pedido por forcemanager_id
-        - Crea o actualiza en Odoo
-        - Maneja 'deleted' y 'dateDeleted' para cancelar el pedido en Odoo
-        - Lee 'Z_Entrega_mismo_comercial' ("Si"/"No") y lo guarda en x_entrega_mismo_comercial ('si'/'no')
-        - Guarda el campo 'status' de ForceManager en forcemanager_status (si existe)
-        """
         _logger.info(">>> [sync_orders] Iniciando sincronización de pedidos (orders)")
-
+        
         last_sync = self._get_last_sync_date('orders')
         if not last_sync:
-            # Si nunca se ha sincronizado antes, partimos de una fecha fija
-            date_updated_str = '2025-01-01T00:00:00Z'
+            date_str = '2025-01-01T00:00:00Z'
         else:
-            # Convertimos el campo de tipo datetime de Odoo a la cadena con 'T' y sufijo 'Z'
             tmp = fields.Datetime.to_string(last_sync)
-            date_updated_str = tmp.replace(' ', 'T') + 'Z'
-
-        # Aquí usamos date_updated_str en el filtro con '>' (greater than)
-        where_clause = f"(dateUpdated > '{date_updated_str}' OR dateCreated > '{date_updated_str}')"
-        endpoint_url = f"salesorders?where={where_clause}"
-        #endpoint_url = f"salesorders"
-        _logger.info("[sync_orders] GET /api/v4/%s", endpoint_url)
-
-        # Petición a ForceManager
-        response = self.env['forcemanager.api']._perform_request(endpoint_url, method='GET')
-        if not response:
-            _logger.warning("[sync_orders] Respuesta vacía o error. Abortando.")
-            return
-
-        fm_order_list = response if isinstance(response, list) else response.get('results', [])
-        _logger.info("[sync_orders] Recibidos %d pedidos desde ForceManager", len(fm_order_list))
-
-        for fm_order in fm_order_list:
-            fm_id = fm_order.get('id')  # p.ej. 123
-            if not fm_id:
-                continue
-            
+            date_str = tmp.replace(' ', 'T') + 'Z'
+        
+        # Realizamos dos consultas separadas:
+        where_clause_updated = f"(dateUpdated > '{date_str}')"
+        where_clause_created = f"(dateCreated > '{date_str}')"
+        
+        endpoint_updated = f"salesorders?where={where_clause_updated}"
+        endpoint_created = f"salesorders?where={where_clause_created}"
+        
+        _logger.info("[sync_orders] GET /api/v4/%s", endpoint_updated)
+        response_updated = self.env['forcemanager.api']._perform_request(endpoint_updated, method='GET')
+        _logger.info("[sync_orders] GET /api/v4/%s", endpoint_created)
+        response_created = self.env['forcemanager.api']._perform_request(endpoint_created, method='GET')
+        
+        orders_updated = response_updated if isinstance(response_updated, list) else response_updated.get('results', [])
+        orders_created = response_created if isinstance(response_created, list) else response_created.get('results', [])
+        
+        # Unir resultados, evitando duplicados (clave: id de ForceManager)
+        orders_union = {}
+        for order in orders_updated + orders_created:
+            fm_order_id = order.get('id')
             try:
-                fm_id_int = int(fm_id)
+                fm_order_id_int = int(fm_order_id) if fm_order_id else 0
+            except ValueError:
+                fm_order_id_int = 0
+            if fm_order_id_int:
+                orders_union[fm_order_id_int] = order
+        fm_order_list = list(orders_union.values())
+        _logger.info("[sync_orders] Unión de pedidos: %d pedidos únicos", len(fm_order_list))
+        
+        # Obtenemos también las líneas para cada pedido (consulta basada en la misma fecha)
+        lines_dict = self._fetch_salesorder_lines_since(date_str)
+        
+        for fm_order in fm_order_list:
+            fm_id_raw = fm_order.get('id')
+            if not fm_id_raw:
+                continue
+            try:
+                fm_id_int = int(fm_id_raw)
             except ValueError:
                 fm_id_int = 0
-
-            # 1) Buscar si ya existe el pedido en Odoo por forcemanager_id
-            order = self.env['sale.order'].search([('forcemanager_id', '=', fm_id_int)], limit=1)
-
-            # 2) Revisar si ForceManager marcó 'deleted' => anular pedido en Odoo
+            
+            # Si el pedido está marcado como 'deleted', lo cancelamos en Odoo
             is_deleted = fm_order.get('deleted') is True
-            date_deleted = fm_order.get('dateDeleted')  # p.ej. "2025-01-31T10:00:00Z"
+            date_deleted = fm_order.get('dateDeleted')
             if is_deleted or date_deleted:
+                order = self.env['sale.order'].search([('forcemanager_id', '=', fm_id_int)], limit=1)
                 if order and order.state not in ('cancel', 'done'):
-                    _logger.info("[sync_orders] FM Order ID=%s está 'deleted'. Cancelando en Odoo.", fm_id_int)
+                    _logger.info("[sync_orders] FM Order ID=%s => 'deleted'. Cancelando en Odoo.", fm_id_int)
                     order.action_cancel()
-                continue  # No crear/actualizar más
+                continue
 
-            # 3) Identificar al cliente (partner_id)
-            fm_account = fm_order.get('accountId')
+            # Parsear la fecha de creación
+            fm_date_str = fm_order.get('dateCreated')
+            date_order = None
+            if fm_date_str:
+                date_order = self._parse_fm_datetime(fm_date_str)
+            
+            # Buscar el partner (la cuenta)
             partner_id = False
-            if fm_account and fm_account.get('id'):
+            fm_acc = fm_order.get('accountId')
+            if fm_acc and fm_acc.get('id'):
                 try:
-                    fm_account_id_int = int(fm_account['id'])
+                    fm_acc_id_int = int(fm_acc['id'])
                 except ValueError:
-                    fm_account_id_int = 0
-
+                    fm_acc_id_int = 0
                 partner_rec = self.env['res.partner'].search([
-                    ('forcemanager_id', '=', fm_account_id_int),
+                    ('forcemanager_id', '=', fm_acc_id_int),
                     ('is_company', '=', True),
                 ], limit=1)
                 if partner_rec:
                     partner_id = partner_rec.id
+            
+            if not partner_id:
+                _logger.error(
+                    "[sync_orders] No se encuentra partner with forcemanager_id=%s. "
+                    "Omitimos creación de pedido (FM ID=%s).",
+                    fm_acc.get('id'), fm_id_int
+                )
+                continue
 
-            # 4) Fecha del pedido
-            date_order = False
-            fm_date_str = fm_order.get('dateCreated')  # "2025-01-21T10:00:00Z"
-            if fm_date_str:
-                try:
-                    fm_date_str = fm_date_str.rstrip("Z")
-                    date_order_dt = datetime.strptime(fm_date_str, '%Y-%m-%dT%H:%M:%S')
-                    date_order = fields.Datetime.to_string(date_order_dt)
-                except ValueError as e:
-                    _logger.warning("[sync_orders] No se pudo parsear dateCreated='%s': %s", fm_date_str, e)
-
-            # 5) Moneda
-            currency_name = fm_order.get('currencyId', {}).get('value')
+            # Moneda
             currency_id = False
+            currency_name = fm_order.get('currencyId', {}).get('value')
             if currency_name:
-                currency_rec = self.env['res.currency'].search([('name', '=', currency_name)], limit=1)
-                if currency_rec:
-                    currency_id = currency_rec.id
-
-            # 6) Comercial (salesRepId => user_id)
+                cobj = self.env['res.currency'].search([('name', '=', currency_name)], limit=1)
+                if cobj:
+                    currency_id = cobj.id
+            
+            # Comercial
             user_id = False
             fm_salesrep = fm_order.get('salesRepId')
             if fm_salesrep and fm_salesrep.get('value'):
                 rep_name = fm_salesrep['value']
-                user_rec = self.env['res.users'].search([('name', '=', rep_name)], limit=1)
-                if user_rec:
-                    user_id = user_rec.id
-                # Si quieres crear usuario si no existe, replica la lógica de sync_accounts()
-
-            # 7) Campo 'Z_Entrega_mismo_comercial' => x_entrega_mismo_comercial
-            fm_entrega = fm_order.get('Z_Entrega_mismo_comercial')  # "Si" / "No"
-            x_entrega = False
-            if fm_entrega == "Si":
+                uobj = self.env['res.users'].search([('name', '=', rep_name)], limit=1)
+                if uobj:
+                    user_id = uobj.id
+            
+            # Procesar Z_Entrega_mismo_comercial: se espera que venga como diccionario con un campo 'value'
+            fm_entrega = fm_order.get('Z_Entrega_mismo_comercial')
+            _logger.info("[sync_orders] El valor de fm_entrega es %s", fm_entrega)
+            if isinstance(fm_entrega, dict):
+                value_entrega = fm_entrega.get('value', '').strip().lower()
+            elif isinstance(fm_entrega, str):
+                value_entrega = fm_entrega.strip().lower()
+            else:
+                value_entrega = ''
+            _logger.info("[sync_orders] El valor procesado de entrega es %s", value_entrega)
+            if value_entrega == "si":
                 x_entrega = 'si'
-            elif fm_entrega == "No":
+            elif value_entrega == "no":
                 x_entrega = 'no'
+            else:
+                x_entrega = False
 
-            # 8) forcemanager_status si lo manda ForceManager
-            fm_status = fm_order.get('status') or ""  # Ajusta la clave si es otra
 
-            # 9) Montar los vals para sale.order
+            # Referencia y status
+            fm_reference = fm_order.get('reference') or ""
+            fm_status = fm_order.get('status') or ""
+            
+            # Montar los vals para sale.order
             vals_order = {
                 'forcemanager_id': fm_id_int,
                 'partner_id': partner_id,
@@ -756,53 +771,169 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'partner_shipping_id': partner_id,
                 'x_entrega_mismo_comercial': x_entrega,
                 'forcemanager_status': fm_status,
+                'client_order_ref': fm_reference,
             }
-
+            
+            order = self.env['sale.order'].search([('forcemanager_id', '=', fm_id_int)], limit=1)
             if order:
                 _logger.info("[sync_orders] Actualizando pedido %d (FM ID=%s)", order.id, fm_id_int)
                 order.write(vals_order)
             else:
                 _logger.info("[sync_orders] Creando nuevo sale.order (FM ID=%s)", fm_id_int)
-                order = self.env['sale.order'].create(vals_order)
-
-            # 10) Manejar líneas del pedido
-            fm_lines = fm_order.get('lines', [])
+                order = self.env['sale.order'].with_context(
+                    mail_create_nosubscribe=True,
+                    mail_notrack=True,
+                    mail_activity_automation_skip=True,
+                    tracking_disable=True
+                ).create(vals_order)
+            
+            # Sincronizar líneas
+            fm_lines = lines_dict.get(fm_id_int, [])
             self._sync_order_lines(order, fm_lines)
+            if order.x_entrega_mismo_comercial == 'si':
+                self.if_is_deliveredbycomercial(order.id)
 
-            # 11) Marcamos como sincronizado
+            
             order.synced_with_forcemanager = True
             _logger.info("[sync_orders] sale.order.id=%d procesado con éxito.", order.id)
-
-        # 12) Actualizar fecha de última sincronización
+        
         self._update_last_sync_date('orders')
         _logger.info("<<< [sync_orders] Finalizada la sincronización de pedidos.")
 
 
 
+
+
+
     def _sync_order_lines(self, order, fm_lines):
         """
-        Crea/actualiza líneas del pedido segun la info de ForceManager.
-        Ejemplo: si no tienes forcemanager_line_id, puedes hacer un "borrar y crear"
+        Crea/actualiza líneas del pedido usando el forcemanager_id del producto.
+        Si el pedido ya está confirmado (state='sale' o 'done') o cancelado (state='cancel'),
+        NO se toca ninguna línea.
         """
-        # Enfoque sencillo: borramos y creamos todas las líneas
+        # Si el pedido está en estado confirmado (sale/done) o cancelado (cancel),
+        # evitamos modificarlo.
+        if order.state in ('sale', 'done', 'cancel'):
+            _logger.info(
+                "[_sync_order_lines] El pedido %d (FM ID=%s) está en estado '%s'; no se modifican las líneas.",
+                order.id, order.forcemanager_id, order.state
+            )
+            return
+
+        _logger.info("[_sync_order_lines] Eliminando líneas previas del pedido %d ...", order.id)
         order.order_line.unlink()
 
-        for line_data in fm_lines:
-            fm_prod_id = line_data.get('productId')
-            product_id = self._find_odoo_product_by_fm_id(fm_prod_id)
+        _logger.info("[_sync_order_lines] Procesando %d líneas para el pedido FM ID=%s ...",
+                    len(fm_lines), order.forcemanager_id)
 
-            price_unit = line_data.get('unitPrice', 0.0)
-            quantity = line_data.get('quantity', 1)
-            product_name = line_data.get('productName', 'Línea sin producto')
+        for i, line_data in enumerate(fm_lines, start=1):
+            # Extraer productId
+            fm_prod = line_data.get('productId')
+            if isinstance(fm_prod, dict):
+                fm_prod_id = fm_prod.get('id')
+            else:
+                fm_prod_id = fm_prod
+
+            product_rec = self.env['product.product'].search(
+                [('forcemanager_id', '=', fm_prod_id)], limit=1
+            )
+
+            if not product_rec:
+                _logger.warning(
+                    "  Línea #%d => Producto FM ID=%s NO encontrado en Odoo. Se omite la línea.",
+                    i, fm_prod_id
+                )
+                continue
+
+            qty = line_data.get('quantity', 1)
+            description = line_data.get('productName') or product_rec.name or "Línea sin producto"
+            _logger.info("  Línea #%d => productName='%s', cantidad=%s", i, description, qty)
 
             line_vals = {
                 'order_id': order.id,
-                'product_id': product_id,
-                'product_uom_qty': quantity,
-                'price_unit': price_unit,
-                'name': product_name,
-        }
-        self.env['sale.order.line'].create(line_vals)
+                'product_id': product_rec.id,
+                'product_uom_qty': qty,
+                'name': description,
+            }
+
+            new_line = self.env['sale.order.line'].create(line_vals)
+            _logger.info(
+                "  Línea #%d => Creada sale.order.line ID=%d para order_id=%d",
+                i, new_line.id, order.id
+            )
+
+        _logger.info("[_sync_order_lines] Finalizado procesamiento de líneas para el pedido %d.", order.id)
+
+
+
+
+        
+    def _fetch_salesorder_lines_since(self, date_updated_str):
+        """
+        Descarga de /salesordersLines las líneas con dateUpdated/dateCreated > date_updated_str
+        y las agrupa en un dict: {salesOrderId: [linea1, linea2, ...]}
+        """
+        where_clause = f"(dateUpdated > '{date_updated_str}' OR dateCreated > '{date_updated_str}')"
+        endpoint = f"salesordersLines?where={where_clause}"
+        _logger.info("[_fetch_salesorder_lines_since] GET /api/v4/%s", endpoint)
+
+        response = self.env['forcemanager.api']._perform_request(endpoint, method='GET')
+        if not response:
+            _logger.warning("[_fetch_salesorder_lines_since] Respuesta vacía o error => devuelvo {}")
+            return {}
+
+        all_lines = response if isinstance(response, list) else response.get('results', [])
+        _logger.info("[_fetch_salesorder_lines_since] Recibidas %d líneas de ForceManager", len(all_lines))
+
+        grouped = {}
+        for ln in all_lines:
+            so_data = ln.get('salesorderId') or {}
+            so_id_raw = so_data.get('id')
+            if not so_id_raw:
+                continue
+            try:
+                so_id_int = int(so_id_raw)
+            except ValueError:
+                so_id_int = 0
+
+            if so_id_int not in grouped:
+                grouped[so_id_int] = []
+            grouped[so_id_int].append(ln)
+        _logger.info(
+        "[_fetch_salesorder_lines_since] Agrupación final por salesorderId: %s",
+        {k: len(v) for k, v in grouped.items()}
+        )
+        return grouped
+
+    def _parse_fm_datetime(self, dt_str):
+        """
+        Intenta parsear el string devuelto por ForceManager (que a veces viene con milisegundos).
+        Devuelve un objeto datetime o None si falla.
+        Ejemplos de formato:
+          - "2025-02-07T12:14:08.63Z"
+          - "2025-02-07T12:14:08Z"
+        """
+        if not dt_str:
+            return None
+        # Remove trailing "Z" if present
+        dt_str = dt_str.strip()
+        if dt_str.endswith("Z"):
+            dt_str = dt_str[:-1]
+
+        # Intentamos con milisegundos y sin milisegundos
+        fmts = [
+            '%Y-%m-%dT%H:%M:%S.%f',
+            '%Y-%m-%dT%H:%M:%S'
+        ]
+        for f in fmts:
+            try:
+                dt = datetime.strptime(dt_str, f)
+                return dt
+            except ValueError:
+                pass
+
+        _logger.warning("[_parse_fm_datetime] No se pudo parsear '%s' con miliseg o sin.", dt_str)
+        return None
 
 
     def _find_odoo_product_by_fm_id(self, fm_prod_id):
@@ -927,3 +1058,112 @@ class ForceManagerToOdooAPI(models.TransientModel):
     def _update_last_sync_date(self, entity):
         self.env['forcemanager.api'].set_last_sync_date(entity)
         _logger.info("[_update_last_sync_date] Fecha de sync actualizada para '%s'.", entity)
+        
+        
+    def if_is_deliveredbycomercial(self, sale_id):
+        """
+        Si el pedido (sale.order) identificado por sale_id tiene
+        x_entrega_mismo_comercial == 'si', se buscará el almacén cuyo
+        nombre sea igual al del comercial asignado, se confirmará el pedido,
+        se forzará la reserva y validación de los pickings (asignando en cada línea
+        la cantidad planificada como realizada), y se generará y publicará la factura.
+        """
+        order = self.env['sale.order'].browse(sale_id)
+        if not order:
+            _logger.error("No se encontró la orden con ID %s", sale_id)
+            return
+
+        if order.x_entrega_mismo_comercial != 'si':
+            _logger.info("La orden %s no está marcada para entrega por comercial.", order.id)
+            return
+
+        # Evitar procesar pedidos en estado 'cancel' o 'done'
+        if order.state in ('cancel', 'done'):
+            _logger.info(
+                "El pedido %s ya está en estado %s, se omite la confirmación y el procesamiento.",
+                order.id, order.state
+            )
+            return
+
+        # 1) Asignar almacén cuyo nombre coincida con el del comercial (usuario).
+        salesrep_name = order.user_id.name or ""
+        warehouse = self.env['stock.warehouse'].search([('name', '=', salesrep_name)], limit=1)
+        if warehouse:
+            order.warehouse_id = warehouse.id
+            _logger.info("Asignado almacén '%s' al pedido %s", warehouse.name, order.id)
+        else:
+            _logger.warning(
+                "No se encontró almacén con nombre '%s' para el pedido %s",
+                salesrep_name, order.id
+            )
+
+        # 2) Confirmar el pedido (si no está ya confirmado)
+        try:
+            if order.state not in ('sale', 'done'):
+                order.action_confirm()
+                _logger.info("Pedido %s confirmado.", order.id)
+            else:
+                _logger.info(
+                    "Pedido %s ya está en estado '%s'; no se llama a action_confirm().",
+                    order.id, order.state
+                )
+        except Exception as e:
+            _logger.error("Error al confirmar el pedido %s: %s", order.id, e)
+
+        # 3) Forzar la validación de los pickings
+        for picking in order.picking_ids.filtered(lambda p: p.state not in ('done','cancel')):
+            try:
+                # (3a) Forzamos la asignación (reservar stock), si está en estado 'confirmed' o 'waiting'
+                if picking.state in ('confirmed','waiting','assigned','partially_available'):
+                    picking.action_assign()
+
+                # (3b) Asegurar que haya move_line_ids y poner qty_done:
+                for move in picking.move_ids.filtered(lambda m: m.state not in ('done','cancel')):
+                    planned_qty = move.product_uom_qty
+
+                    if not move.move_line_ids:
+                        # No existen lineas => crearlas
+                        self.env['stock.move.line'].create({
+                            'move_id': move.id,
+                            'product_id': move.product_id.id,
+                            'product_uom_id': move.product_uom.id,
+                            'qty_done': planned_qty,  # Forzamos la entrega completa
+                            'location_id': picking.location_id.id,
+                            'location_dest_id': picking.location_dest_id.id,
+                            'picking_id': picking.id,
+                        })
+                    else:
+                        # Si hay move_line_ids, seteamos qty_done = product_uom_qty
+                        for ml in move.move_line_ids:
+                            ml.qty_done = planned_qty
+
+                # (3c) Validar con contexto "force_validate" (si tu custom respeta esa clave)
+                picking.with_context(force_validate=True).button_validate()
+                _logger.info("Picking %s validado para el pedido %s.", picking.id, order.id)
+            except Exception as e:
+                _logger.error(
+                    "Error al validar el picking %s del pedido %s: %s",
+                    picking.id, order.id, e
+                )
+
+        # 4) Ajustar qty_delivered de las líneas de venta si la política es "delivered".
+        for so_line in order.order_line:
+            if so_line.product_id.invoice_policy == 'delivery':
+                so_line.qty_delivered = so_line.product_uom_qty
+
+        # 5) Crear y publicar la factura (confirmarla)
+        try:
+            invoice_ids = order._create_invoices()
+            if invoice_ids:
+                # Asegurarse de trabajar con un recordset
+                invoices = (invoice_ids
+                            if isinstance(invoice_ids, self.env['account.move'])
+                            else self.env['account.move'].browse(invoice_ids))
+                # En Odoo 13+ confirmamos con action_post()
+                # (En Odoo <=12 era action_invoice_open())
+                invoices.action_post()
+                _logger.info("Factura(s) creada(s) y publicadas para el pedido %s.", order.id)
+            else:
+                _logger.warning("No se generaron facturas para el pedido %s.", order.id)
+        except Exception as e:
+            _logger.error("Error al facturar el pedido %s: %s", order.id, e)

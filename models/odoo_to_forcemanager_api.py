@@ -20,11 +20,11 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         # Llamamos solamente a sync_products(), por ejemplo.
         # (Descomenta las otras si quieres sincronizarlas)
-        self.sync_accounts()
-        self.sync_contacts()
+        #self.sync_accounts()
+        #self.sync_contacts()
         self.sync_products()
-        self.sync_opportunities()
-        self.sync_orders()
+        #self.sync_opportunities()
+        #self.sync_orders()
 
         _logger.info("<<< [OdooToForceManagerAPI] action_sync_to_forcemanager() END")
 
@@ -58,26 +58,33 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         # =========== CREAR (POST) ===========
         if to_create:
-            bulk_payload_create = []
-            for p in to_create:
-                single_data = self._prepare_single_account_payload(p, is_update=False)
-                guid_val = f"odoo_create_{p.id}"
-                bulk_payload_create.append({"guid": guid_val, "data": single_data})
-
-            endpoint_bulk_create = "accounts/bulk"
-            if bulk_payload_create and self._has_bulk_endpoint(endpoint_bulk_create):
-                _logger.info("[sync_accounts][BULK CREATE] %d records → %s", len(bulk_payload_create), endpoint_bulk_create)
-                resp = self.env['forcemanager.api']._perform_request(endpoint_bulk_create, method='POST', payload=bulk_payload_create)
-                self._process_bulk_create_response(resp, to_create)
+            if self._has_bulk_endpoint("products/bulk"):
+                _logger.info("[sync_products][BULK CREATE] Usando bulk endpoint para crear productos.")
+                bulk_payload = []
+                for prod in to_create:
+                    bulk_payload.append({
+                        "guid": f"odoo_create_{prod.id}",
+                        "data": self._prepare_single_product_payload_bulk(prod, is_create=True)
+                    })
+                resp = self.env['forcemanager.api']._perform_request("products/bulk", method="POST", payload=bulk_payload)
+                # Procesar la respuesta para asignar forcemanager_id, etc.
+                for item in resp:
+                    guid = item.get('guid')
+                    fm_id = item.get('id')
+                    if guid and fm_id:
+                        prod_id = int(guid.split('_')[-1])
+                        prod = to_create.filtered(lambda p: p.id == prod_id)
+                        prod.forcemanager_id = str(fm_id)
+                        prod.synced_with_forcemanager = True
             else:
-                _logger.warning("[sync_accounts] /accounts/bulk (POST) no disponible. Fallback 1x1.")
-                for p in to_create:
-                    single_data = self._prepare_single_account_payload(p, is_update=False)
-                    endpoint = "accounts"
-                    response = self.env['forcemanager.api']._perform_request(endpoint, method='POST', payload=single_data)
-                    if response and isinstance(response, dict) and response.get('id'):
-                        p.forcemanager_id = response['id']
-                    p.synced_with_forcemanager = True
+                _logger.warning("[sync_products] Bulk endpoint no disponible. Fallback 1x1.")
+                for prod in to_create:
+                    data = self._prepare_single_product_payload_bulk(prod, is_create=True)
+                    resp = self.env['forcemanager.api']._perform_request("products", method='POST', payload=data)
+                    if resp and resp.get('id'):
+                        prod.forcemanager_id = str(resp['id'])
+                    prod.synced_with_forcemanager = True
+
 
         # =========== ACTUALIZAR (PUT) ===========
         if to_update:
@@ -98,7 +105,8 @@ class OdooToForceManagerAPI(models.TransientModel):
                     single_data = self._prepare_single_account_payload(p, is_update=True)
                     endpoint = f"accounts/{p.forcemanager_id}"
                     self.env['forcemanager.api']._perform_request(endpoint, method='PUT', payload=single_data)
-                    p.synced_with_forcemanager = True
+                    p.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
+
 
         self._update_last_sync_date('accounts')
         _logger.info("[sync_accounts] Finalizada la sincronización de cuentas.")
@@ -145,7 +153,8 @@ class OdooToForceManagerAPI(models.TransientModel):
                     response = self.env['forcemanager.api']._perform_request("contacts", method='POST', payload=single_pl)
                     if response and isinstance(response, dict) and response.get('id'):
                         c.forcemanager_id = response['id']
-                    c.synced_with_forcemanager = True
+                    c.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
+
 
         # =========== ACTUALIZAR ===========
         if to_update:
@@ -167,7 +176,8 @@ class OdooToForceManagerAPI(models.TransientModel):
                     single_pl = self._prepare_single_contact_payload_for_update(c)
                     ep = f"contacts/{c.forcemanager_id}"
                     self.env['forcemanager.api']._perform_request(ep, method='PUT', payload=single_pl)
-                    c.synced_with_forcemanager = True
+                    c.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
+
 
         self._update_last_sync_date('contacts')
         _logger.info("[sync_contacts] Finalizada la sincronización de contactos.")
@@ -177,16 +187,15 @@ class OdooToForceManagerAPI(models.TransientModel):
     # -------------------------------------------------------------------------
     def sync_products(self):
         """
-        Envía los productos a ForceManager usando /products/bulk (si existe),
-        o fallback 1x1. Incluye la triple OR:
+        Envía los productos a ForceManager de forma 1x1.
+        Se filtra con la triple OR:
         - (A) write_date > last_sync
-        - (B) forcemanager_id=False
-        - (C) synced_with_forcemanager=False
+        - (B) forcemanager_id = False
+        - (C) synced_with_forcemanager = False
         para detectar los productos que deben subirse/actualizarse.
 
-        Se actualiza y envía el stock (product.qty_available) a ForceManager,
-        y se envía 'description_sale' como 'description', que es lo que
-        ForceManager espera y lo que luego recibimos en forcemanager_to_odoo_api.
+        Se actualiza el stock (product.qty_available) y se envía 'description_sale'
+        como 'description'. Además, se asigna el forcemanager_id recibido en la respuesta.
         """
         _logger.info("[sync_products] Iniciando envío de productos a ForceManager.")
         last_sync = self._get_last_sync_date('products')
@@ -199,57 +208,31 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         _logger.info("[sync_products] Encontrados %d productos. (dominio=%s)", len(products), domain)
 
+        # Separamos en productos a crear y a actualizar
         to_create = products.filtered(lambda p: not p.forcemanager_id)
         to_update = products - to_create
 
-        # =========== CREAR ===========
+        # CREAR productos 1x1
         if to_create:
-            bulk_payload_create = []
             for prod in to_create:
-                guid_str = f"odoo_create_{prod.id}"
-                data_obj = self._prepare_single_product_payload_bulk(prod, is_create=True)
-                bulk_payload_create.append({"guid": guid_str, "data": data_obj})
+                data = self._prepare_single_product_payload_bulk(prod, is_create=True)
+                resp = self.env['forcemanager.api']._perform_request("products", method='POST', payload=data)
+                if resp and resp.get('id'):
+                    prod.forcemanager_id = str(resp['id'])
+                prod.synced_with_forcemanager = True
 
-            endpoint_create = "products/bulk"
-            if bulk_payload_create and self._has_bulk_endpoint(endpoint_create):
-                _logger.info("[sync_products][BULK CREATE] Enviando %d → %s", len(bulk_payload_create), endpoint_create)
-                response = self.env['forcemanager.api']._perform_request(endpoint_create, method="POST", payload=bulk_payload_create)
-                self._process_bulk_create_response(response, to_create)
-            else:
-                _logger.warning("[sync_products] /products/bulk (POST) no disponible. Fallback 1x1.")
-                for prod in to_create:
-                    single_item = {
-                        "guid": f"odoo_create_{prod.id}",
-                        "data": self._prepare_single_product_payload_bulk(prod, is_create=True)
-                    }
-                    resp = self.env['forcemanager.api']._perform_request("products/bulk", method="POST", payload=[single_item])
-                    self._assign_fm_id_single_create(resp, prod)
-
-        # =========== ACTUALIZAR ===========
+        # ACTUALIZAR productos 1x1
         if to_update:
-            bulk_payload_update = []
             for prod in to_update:
-                guid_str = f"odoo_update_{prod.id}"
-                data_obj = self._prepare_single_product_payload_bulk(prod, is_create=False)
-                bulk_payload_update.append({"guid": guid_str, "data": data_obj})
-
-            endpoint_update = "products/bulk"
-            if bulk_payload_update and self._has_bulk_endpoint(endpoint_update):
-                _logger.info("[sync_products][BULK UPDATE] Enviando %d → %s", len(bulk_payload_update), endpoint_update)
-                response = self.env['forcemanager.api']._perform_request(endpoint_update, method="PUT", payload=bulk_payload_update)
-                self._process_bulk_update_response(response, to_update)
-            else:
-                _logger.warning("[sync_products] /products/bulk (PUT) no disponible. Fallback 1x1.")
-                for prod in to_update:
-                    single_item = {
-                        "guid": f"odoo_update_{prod.id}",
-                        "data": self._prepare_single_product_payload_bulk(prod, is_create=False),
-                    }
-                    resp = self.env['forcemanager.api']._perform_request("products/bulk", method="PUT", payload=[single_item])
-                    prod.synced_with_forcemanager = True
+                data = self._prepare_single_product_payload_bulk(prod, is_create=False)
+                endpoint = f"products/{prod.forcemanager_id}"
+                self.env['forcemanager.api']._perform_request(endpoint, method='PUT', payload=data)
+                prod.synced_with_forcemanager = True
 
         self._update_last_sync_date('products')
         _logger.info("[sync_products] Sincronización de productos finalizada.")
+
+
 
 
 
