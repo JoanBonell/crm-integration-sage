@@ -156,6 +156,44 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 )
                 if rec_fpos:
                     property_account_position_id = rec_fpos.id
+            
+            # ---------------------------------------------------------------------
+            # 4) OBTENER "typeId" => Etiqueta (p.ej. "Estanco", "Segundo canal")
+            # ---------------------------------------------------------------------
+            type_dict = fm_acc.get('typeId', {})
+            tipo_empresa = type_dict.get('value', "")  # p.ej. "Estanco", "Segundo canal", ...
+            tipo_empresa = tipo_empresa.strip()
+
+            tag_vals = {}
+            if tipo_empresa:
+                # Buscamos/creamos un registro en res.partner.category
+                etiqueta = self.env['res.partner.category'].search([('name', '=', tipo_empresa)], limit=1)
+                if not etiqueta:
+                    etiqueta = self.env['res.partner.category'].create({'name': tipo_empresa})
+                # Añadir la etiqueta al partner
+                tag_vals['category_id'] = [(4, etiqueta.id)]
+            
+            # ---------------------------------------------------------------------
+            # (3 BIS) Condiciones de pago => property_payment_term_id
+            # ---------------------------------------------------------------------
+            # (3 BIS) Condiciones de pago => property_payment_term_id
+            cond_pago_dict = fm_acc.get('Z_Condiciones_de_pago', {})
+            cond_pago_value = (cond_pago_dict.get('value') or "").strip()  # p.ej. "15 Días"
+
+            payment_term_id = False
+            if cond_pago_value:
+                # Buscar sin distinguir mayúsculas/minúsculas con 'ilike'
+                payment_term = self.env['account.payment.term'].search(
+                    [('name', 'ilike', cond_pago_value)], limit=1
+                )
+                if not payment_term:
+                    # Si no existe, lo creamos usando el texto tal cual llega de FM
+                    payment_term = self.env['account.payment.term'].create({
+                        'name': cond_pago_value
+                    })
+                payment_term_id = payment_term.id
+
+
 
             # =====================================================================
             # 4) Crear/actualizar el partner principal (is_company=True)
@@ -183,6 +221,10 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'forcemanager_country_id': fm_country_id,
                 'forcemanager_country': fm_country_str,
             }
+            if payment_term_id:
+                vals['property_payment_term_id'] = payment_term_id
+            
+            vals.update(tag_vals)
 
             #if partner:
             #    _logger.info("[sync_accounts] Actualizando partner %d (FM ID=%s)", partner.id, fm_id)
