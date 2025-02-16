@@ -834,6 +834,12 @@ class ForceManagerToOdooAPI(models.TransientModel):
             self._sync_order_lines(order, fm_lines)
             if order.x_entrega_mismo_comercial == 'si':
                 self.if_is_deliveredbycomercial(order.id)
+            else:
+                # Si NO entrega el comercial => confirmamos directamente
+                if order.state not in ('sale', 'done', 'cancel'):
+                    # Confirmar con envío de correo
+                    order.with_context(send_email=True).action_confirm()
+                    
 
             
             order.synced_with_forcemanager = True
@@ -843,18 +849,12 @@ class ForceManagerToOdooAPI(models.TransientModel):
         _logger.info("<<< [sync_orders] Finalizada la sincronización de pedidos.")
 
 
-
-
-
-
     def _sync_order_lines(self, order, fm_lines):
         """
         Crea/actualiza líneas del pedido usando el forcemanager_id del producto.
         Si el pedido ya está confirmado (state='sale' o 'done') o cancelado (state='cancel'),
         NO se toca ninguna línea.
         """
-        # Si el pedido está en estado confirmado (sale/done) o cancelado (cancel),
-        # evitamos modificarlo.
         if order.state in ('sale', 'done', 'cancel'):
             _logger.info(
                 "[_sync_order_lines] El pedido %d (FM ID=%s) está en estado '%s'; no se modifican las líneas.",
@@ -865,8 +865,19 @@ class ForceManagerToOdooAPI(models.TransientModel):
         _logger.info("[_sync_order_lines] Eliminando líneas previas del pedido %d ...", order.id)
         order.order_line.unlink()
 
-        _logger.info("[_sync_order_lines] Procesando %d líneas para el pedido FM ID=%s ...",
-                    len(fm_lines), order.forcemanager_id)
+        # 1) Verificamos la tarifa del partner
+        pricelist = order.partner_id.property_product_pricelist
+        pricelist_name = pricelist.name if pricelist else ""
+        # Comprobar si *no* empieza por dígito
+        # Ejemplo sencillo: si la primera letra NO es un dígito => usaremos precio de ForceManager
+        usar_precio_fm = True
+        if pricelist_name and pricelist_name[0].isdigit():
+            usar_precio_fm = False
+
+        _logger.info(
+            "[_sync_order_lines] Procesando %d líneas para el pedido FM ID=%s (tarifa=%s, usar_precio_fm=%s)...",
+            len(fm_lines), order.forcemanager_id, pricelist_name, usar_precio_fm
+        )
 
         for i, line_data in enumerate(fm_lines, start=1):
             # Extraer productId
@@ -879,7 +890,6 @@ class ForceManagerToOdooAPI(models.TransientModel):
             product_rec = self.env['product.product'].search(
                 [('forcemanager_id', '=', fm_prod_id)], limit=1
             )
-
             if not product_rec:
                 _logger.warning(
                     "  Línea #%d => Producto FM ID=%s NO encontrado en Odoo. Se omite la línea.",
@@ -889,7 +899,16 @@ class ForceManagerToOdooAPI(models.TransientModel):
 
             qty = line_data.get('quantity', 1)
             description = line_data.get('productName') or product_rec.name or "Línea sin producto"
-            _logger.info("  Línea #%d => productName='%s', cantidad=%s", i, description, qty)
+
+            # 2) Si la tarifa no empieza por dígito, forzamos el price_unit con el que venga de ForceManager
+            # (puede que FM devuelva 'price' o 'price_unit', ajusta según tu JSON)
+            fm_price = line_data.get('price', 0.0)  
+            price_unit = fm_price if usar_precio_fm else False
+
+            _logger.info(
+                "  Línea #%d => productName='%s', cantidad=%s, price_unit=%s (tarifa sin dígito? %s)",
+                i, description, qty, fm_price, usar_precio_fm
+            )
 
             line_vals = {
                 'order_id': order.id,
@@ -897,6 +916,8 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'product_uom_qty': qty,
                 'name': description,
             }
+            if usar_precio_fm:
+                line_vals['price_unit'] = price_unit
 
             new_line = self.env['sale.order.line'].create(line_vals)
             _logger.info(
