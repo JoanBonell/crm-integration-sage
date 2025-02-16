@@ -296,14 +296,30 @@ class OdooToForceManagerAPI(models.TransientModel):
     def _eliminar_producto_forcemanager(self, fm_id, reason=""):
         """
         Llama DELETE /products/<fm_id> y hace log del suceso.
+        Tras eliminarlo en ForceManager, si existe en Odoo,
+        le quitamos el 'forcemanager_id' y marcamos synced_with_forcemanager=False.
         """
         _logger.info("Eliminando producto FM ID=%s en ForceManager (motivo: %s)", fm_id, reason or "N/A")
         endpoint_delete = f"products/{fm_id}"
         try:
             self.env['forcemanager.api']._perform_request(endpoint_delete, method='DELETE')
-            _logger.info("Producto FM ID=%s eliminado correctamente.", fm_id)
+            _logger.info("Producto FM ID=%s eliminado correctamente en ForceManager.", fm_id)
+
+            # A continuación, quitamos el forcemanager_id en Odoo, si existe
+            product_odoo = self.env['product.template'].search([('forcemanager_id', '=', str(fm_id))], limit=1)
+            if product_odoo:
+                product_odoo.write({
+                    'forcemanager_id': False,
+                    'synced_with_forcemanager': False
+                })
+                _logger.info(
+                    "Producto Odoo ID=%d: forcemanager_id eliminado y synced_with_forcemanager=False",
+                    product_odoo.id
+                )
+
         except Exception as e:
             _logger.warning("Error al eliminar el producto FM ID=%s: %s", fm_id, e)
+
 
 
 
