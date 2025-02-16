@@ -25,6 +25,7 @@ Este módulo integra Odoo con ForceManager, leyendo claves desde
         'views/res_users_view_inherit.xml',
         'views/sale_order_view_inherit_forcemanager.xml',
         'views/product_template_view_inherit_forcemanager.xml',
+        'views/product_category_view_inherit_forcemanager.xml',
     ],
     'post_init_hook': 'post_init_hook',
     'installable': True,

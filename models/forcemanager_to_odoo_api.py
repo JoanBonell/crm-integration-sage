@@ -1093,6 +1093,15 @@ class ForceManagerToOdooAPI(models.TransientModel):
                         categ_id = existing_cat.id
                     else:
                         _logger.info("[sync_products] Category FM ID=%s no se encuentra en Odoo => se omite.", cat_str)
+                        
+            # 3) Verificamos si la categoría final (o la que ya tenía) está B2B (si no, saltamos)
+            final_category = CategoryObj.browse(categ_id)
+            if final_category and not final_category.b2b_available:
+                _logger.info(
+                    "[sync_products] (FM ID=%s) Se omite, porque la categoría '%s' no es b2b_available.",
+                    fm_prod_id, final_category.name
+                )
+                continue
 
             # 4) Construimos los vals para actualizar en Odoo
             vals = {

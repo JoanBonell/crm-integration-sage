@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_product_category_form_inherit_forcemanager" model="ir.ui.view">
+        <field name="name">product.category.form.inherit.forcemanager</field>
+        <field name="model">product.category</field>
+        <!-- Ajustar el inherit_id para que coincida con el ID real de la vista form de product.category -->
+        <field name="inherit_id" ref="product.product_category_form_view"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='name']" position="after">
+                <separator string="ForceManager Info"/>
+                <field name="forcemanager_id" string="ForceManager ID" readonly="1"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

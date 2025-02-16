@@ -187,19 +187,19 @@ class OdooToForceManagerAPI(models.TransientModel):
     # -------------------------------------------------------------------------
     def sync_products(self):
         """
-        Envía los productos a ForceManager de forma 1x1.
-        Se filtra con la triple OR:
-        - (A) write_date > last_sync
-        - (B) forcemanager_id = False
-        - (C) synced_with_forcemanager = False
-        para detectar los productos que deben subirse/actualizarse.
-
-        Se actualiza el stock (product.qty_available) y se envía 'description_sale'
-        como 'description'. Además, se asigna el forcemanager_id recibido en la respuesta.
+        Envía (ODoo→FM) y, además, primero verifica que los productos en FM sigan siendo válidos:
+        - Si no existen en Odoo o su categoría no es b2b_available, se eliminan en FM.
         """
         _logger.info("[sync_products] Iniciando envío de productos a ForceManager.")
+
+        # 1) Verificar los productos ya existentes en FM (y borrar los que no apliquen)
+        self.verificar_productos_forcemanager_sincronizados()
+
+        # 2) Filtrar productos Odoo que SÍ se deben subir/actualizar a FM
         last_sync = self._get_last_sync_date('products')
         domain = self._build_domain_for_odoo2fm(last_sync)
+        # Añadir condición: categoría con b2b_available = True
+        domain.insert(0, ('categ_id.b2b_available', '=', True))
 
         products = self.env['product.template'].search(domain)
         if not products:
@@ -208,11 +208,11 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         _logger.info("[sync_products] Encontrados %d productos. (dominio=%s)", len(products), domain)
 
-        # Separamos en productos a crear y a actualizar
+        # Separamos en productos a CREAR (sin forcemanager_id) y a ACTUALIZAR (con forcemanager_id)
         to_create = products.filtered(lambda p: not p.forcemanager_id)
         to_update = products - to_create
 
-        # CREAR productos 1x1
+        # ============== CREAR productos en ForceManager ==============
         if to_create:
             for prod in to_create:
                 data = self._prepare_single_product_payload_bulk(prod, is_create=True)
@@ -221,7 +221,7 @@ class OdooToForceManagerAPI(models.TransientModel):
                     prod.forcemanager_id = str(resp['id'])
                 prod.synced_with_forcemanager = True
 
-        # ACTUALIZAR productos 1x1
+        # ============== ACTUALIZAR productos en ForceManager ==============
         if to_update:
             for prod in to_update:
                 data = self._prepare_single_product_payload_bulk(prod, is_create=False)
@@ -229,10 +229,81 @@ class OdooToForceManagerAPI(models.TransientModel):
                 self.env['forcemanager.api']._perform_request(endpoint, method='PUT', payload=data)
                 prod.synced_with_forcemanager = True
 
+        # Actualizamos la fecha de la última sincronización
         self._update_last_sync_date('products')
         _logger.info("[sync_products] Sincronización de productos finalizada.")
 
+    def verificar_productos_forcemanager_sincronizados(self):
+        """
+        1) Descarga la lista actual de productos en ForceManager (GET /products).
+        2) Para cada uno de ellos:
+        - Descarta los que ya tengan "deleted": true en ForceManager.
+        - Busca el producto correspondiente en Odoo (por forcemanager_id).
+        - Si NO existe en Odoo, o su categoría NO tiene b2b_available=True,
+            se borra el producto en ForceManager (DELETE /products/<id>).
+        """
+        _logger.info("[verificar_productos_forcemanager_sincronizados] Iniciando verificación en ForceManager...")
 
+        where_clause = f"(deleted = 'false' OR deleted = 'False')"
+        endpoint_url = f"products?where={where_clause}"
+        #endpoint_url = "products?where=deleted=false"
+        fm_products = self.env['forcemanager.api']._perform_request(endpoint_url, method='GET')
+        if not fm_products:
+            fm_products = []
+        elif not isinstance(fm_products, list):
+            fm_products = fm_products.get('results', [])
+
+        _logger.info("Se han encontrado %d productos en ForceManager (incluyendo los borrados).", len(fm_products))
+
+        for fm_prod in fm_products:
+            fm_id = fm_prod.get('id')
+            if not fm_id:
+                continue
+
+            # 1) Si ForceManager ya marca "deleted": True, lo ignoramos directamente
+            if fm_prod.get('deleted'):
+                _logger.info("Se omite producto FM ID=%s (ya está 'deleted' en ForceManager).", fm_id)
+                continue
+
+            # 2) Buscar en Odoo
+            product_odoo = self.env['product.template'].search([('forcemanager_id', '=', str(fm_id))], limit=1)
+            if not product_odoo:
+                # No existe en Odoo => BORRAR en FM
+                self._eliminar_producto_forcemanager(fm_id, reason="No existe en Odoo")
+                continue
+
+            # 3) Existe en Odoo => verificar categoría
+            categ = product_odoo.categ_id
+            if not categ.b2b_available:
+                # La categoría NO está marcada como B2B => BORRAR en FM
+                self._eliminar_producto_forcemanager(
+                    fm_id,
+                    reason=f"Categ '{categ.name}' no es b2b_available"
+                )
+                continue
+
+            # Opcional: más comprobaciones...
+            # if not categ.forcemanager_id:
+            #     self._eliminar_producto_forcemanager(
+            #         fm_id,
+            #         reason="Categoría ya no tiene forcemanager_id"
+            #     )
+            #     continue
+
+        _logger.info("[verificar_productos_forcemanager_sincronizados] Finalizada la verificación.")
+
+
+    def _eliminar_producto_forcemanager(self, fm_id, reason=""):
+        """
+        Llama DELETE /products/<fm_id> y hace log del suceso.
+        """
+        _logger.info("Eliminando producto FM ID=%s en ForceManager (motivo: %s)", fm_id, reason or "N/A")
+        endpoint_delete = f"products/{fm_id}"
+        try:
+            self.env['forcemanager.api']._perform_request(endpoint_delete, method='DELETE')
+            _logger.info("Producto FM ID=%s eliminado correctamente.", fm_id)
+        except Exception as e:
+            _logger.warning("Error al eliminar el producto FM ID=%s: %s", fm_id, e)
 
 
 

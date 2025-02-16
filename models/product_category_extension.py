@@ -15,14 +15,6 @@ class ProductCategory(models.Model):
 
     @api.model
     def sync_categories_to_forcemanager_on_init(self):
-        """
-        Lógica de sincronización (Odoo => ForceManager) en la INSTALACIÓN del módulo.
-        Pasos:
-         1) Leer todas las categorías de FM (GET /productCategories).
-         2) Eliminar en FM las que NO existan en Odoo.
-         3) Crear/actualizar en FM cada categoría de Odoo,
-            incluyendo cLevel2 y descriptionES / descriptionEN (y el resto vacío).
-        """
         _logger.info("[sync_categories_to_forcemanager_on_init] INICIO")
 
         # 1) OBTENER las categorías en ForceManager
@@ -33,42 +25,41 @@ class ProductCategory(models.Model):
         if not fm_categories:
             fm_categories = []
         elif not isinstance(fm_categories, list):
-            # Si la API devolviera algo tipo {"results": [...]} en lugar de lista
             fm_categories = fm_categories.get('results', [])
 
         _logger.info("Recibidas %d categorías desde ForceManager.", len(fm_categories))
 
-        # Para localizarlas rápido por 'id'
-        fm_dict = {str(item['id']): item for item in fm_categories if item.get('id')}
-
-        # 2) ELIMINAR EN FM las que NO existen en Odoo
-        #    - Recorremos la lista de fm_categories
-        #    - Si no hay en Odoo ninguna con forcemanager_id=item['id'], se hace DELETE
+        # 2) ELIMINAR EN FM las que NO existan en Odoo con b2b_available=True
+        #
+        #    Es decir, si en FM hay una categoría con id X pero en Odoo:
+        #      - no existe ninguna categoría con forcemanager_id=X, o
+        #      - sí existe, pero b2b_available=False,
+        #    entonces la borramos de FM.
+        #
         for fm_item in fm_categories:
             fm_id_str = str(fm_item.get('id'))
-            # Buscar en Odoo
-            cat_odoo = self.search([('forcemanager_id', '=', fm_id_str)], limit=1)
+            # Buscamos en Odoo UNA categoría con forcemanager_id=fm_id_str y b2b_available=True
+            cat_odoo = self.search([
+                ('forcemanager_id', '=', fm_id_str),
+                ('b2b_available', '=', True)
+            ], limit=1)
             if not cat_odoo:
-                # Significa que en Odoo no existe => borrar en FM
-                _logger.info("Eliminando en ForceManager la categoría FM ID=%s (no existe en Odoo)", fm_id_str)
+                _logger.info("Eliminando en ForceManager la categoría FM ID=%s (no existe o b2b_available=False en Odoo)",
+                            fm_id_str)
                 endpoint_delete = f"productCategories/{fm_id_str}"
                 try:
                     self.env['forcemanager.api']._perform_request(endpoint_delete, method='DELETE')
                 except Exception as e:
                     _logger.warning("Error intentando borrar la categoría FM ID=%s: %s", fm_id_str, e)
 
-        # 3) RECORRER TODAS LAS CATEGORÍAS DE ODOO y crear/actualizar en FM
-        all_odoo_cats = self.search([])
-        _logger.info("Analizando %d categorías de producto en Odoo.", len(all_odoo_cats))
+        # 3) CREAR/ACTUALIZAR EN FM únicamente las categorías de Odoo con b2b_available=True
+        all_odoo_cats = self.search([('b2b_available', '=', True)])
+        _logger.info("Analizando %d categorías de producto en Odoo (b2b_available=True).", len(all_odoo_cats))
 
         for cat in all_odoo_cats:
-            # Preparar las "descriptions" requeridas por ForceManager
-            # ForceManager requiere descriptionEN (obligatorio), y sugiere los demás.
-            # Ponemos cLevel2 = cat.id, descriptionES y descriptionEN con cat.name
-            # El resto lo dejamos vacío.
             payload_data = {
                 "cLevel2": cat.id,
-                "descriptionEN": cat.name or "Unnamed Category",  # Obligatorio
+                "descriptionEN": cat.name or "Unnamed Category",  # Obligatorio para FM
                 "descriptionES": cat.name or "Unnamed Category",
                 "descriptionBR": "",
                 "descriptionDE": "",
@@ -81,9 +72,7 @@ class ProductCategory(models.Model):
             }
 
             if not cat.forcemanager_id:
-                # CREAR en ForceManager => POST /productCategories
-                # Además del 'payload_data', ForceManager podría requerir otros campos:
-                # e.g. "extId", etc. Ajusta según su documentación.
+                # CREAR en ForceManager
                 try:
                     response_create = self.env['forcemanager.api']._perform_request(
                         'productCategories',
@@ -93,20 +82,14 @@ class ProductCategory(models.Model):
                     if (response_create 
                             and isinstance(response_create, dict) 
                             and response_create.get('id')):
-                        cat.write({
-                            'forcemanager_id': str(response_create['id'])
-                        })
+                        cat.write({'forcemanager_id': str(response_create['id'])})
                         _logger.info("Categoría '%s' creada en FM con ID=%s", cat.name, response_create['id'])
                 except Exception as e:
                     _logger.warning("Error creando categoría '%s' en ForceManager: %s", cat.name, e)
             else:
-                # ACTUALIZAR en ForceManager => PUT /productCategories/<forcemanager_id>
+                # ACTUALIZAR en ForceManager
                 fm_id_str = cat.forcemanager_id
-                # ForceManager solicita "id" en el body para la actualización,
-                # con un int (asumiendo que forcemanager_id es convertible a int).
-                payload_data.update({
-                    "id": int(fm_id_str),
-                })
+                payload_data.update({"id": int(fm_id_str)})
                 endpoint_update = f"productCategories/{fm_id_str}"
                 try:
                     self.env['forcemanager.api']._perform_request(
@@ -119,6 +102,7 @@ class ProductCategory(models.Model):
                     _logger.warning("Error actualizando categoría FM ID=%s: %s", fm_id_str, e)
 
         _logger.info("[sync_categories_to_forcemanager_on_init] FIN")
+
         
     def delete_all_categories_in_forcemanager(self):
         """
