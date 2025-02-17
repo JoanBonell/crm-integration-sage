@@ -20,11 +20,11 @@ class OdooToForceManagerAPI(models.TransientModel):
 
         # Llamamos solamente a sync_products(), por ejemplo.
         # (Descomenta las otras si quieres sincronizarlas)
-        #self.sync_accounts()
-        #self.sync_contacts()
+        self.sync_accounts()
+        self.sync_contacts()
         self.sync_products()
-        #self.sync_opportunities()
-        #self.sync_orders()
+        self.sync_opportunities()
+        self.sync_orders()
 
         _logger.info("<<< [OdooToForceManagerAPI] action_sync_to_forcemanager() END")
 
