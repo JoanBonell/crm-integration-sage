@@ -237,16 +237,18 @@ class OdooToForceManagerAPI(models.TransientModel):
         """
         1) Descarga la lista actual de productos en ForceManager (GET /products).
         2) Para cada uno de ellos:
-        - Descarta los que ya tengan "deleted": true en ForceManager.
-        - Busca el producto correspondiente en Odoo (por forcemanager_id).
-        - Si NO existe en Odoo, o su categoría NO tiene b2b_available=True,
+        - Si "deleted"=True en FM, quitamos el forcemanager_id en Odoo (para que deje de estar vinculado).
+        - Si no está "deleted":
+            - Buscamos el producto correspondiente en Odoo (por forcemanager_id).
+            - Si NO existe en Odoo, o su categoría NO tiene b2b_available=True,
             se borra el producto en ForceManager (DELETE /products/<id>).
         """
         _logger.info("[verificar_productos_forcemanager_sincronizados] Iniciando verificación en ForceManager...")
 
+        # Ejemplo de cláusula where (depende de la API de FM si la admite o no):
         where_clause = f"(deleted = 'false' OR deleted = 'False')"
         endpoint_url = f"products?where={where_clause}"
-        #endpoint_url = "products?where=deleted=false"
+        
         fm_products = self.env['forcemanager.api']._perform_request(endpoint_url, method='GET')
         if not fm_products:
             fm_products = []
@@ -260,12 +262,19 @@ class OdooToForceManagerAPI(models.TransientModel):
             if not fm_id:
                 continue
 
-            # 1) Si ForceManager ya marca "deleted": True, lo ignoramos directamente
-            if fm_prod.get('deleted'):
-                _logger.info("Se omite producto FM ID=%s (ya está 'deleted' en ForceManager).", fm_id)
+            # 1) Si ForceManager ya marca "deleted": True => eliminamos el forcemanager_id en Odoo
+            if fm_prod.get('deleted') is True:
+                _logger.info("Producto FM ID=%s aparece 'deleted' en ForceManager => eliminando vínculo en Odoo.", fm_id)
+                product_odoo = self.env['product.template'].search([('forcemanager_id', '=', str(fm_id))], limit=1)
+                if product_odoo:
+                    product_odoo.write({
+                        'forcemanager_id': False,
+                        'synced_with_forcemanager': False
+                    })
+                    _logger.info("Vínculo eliminado en Odoo (product.template ID=%d).", product_odoo.id)
                 continue
 
-            # 2) Buscar en Odoo
+            # 2) Si NO está "deleted": verificamos su existencia en Odoo
             product_odoo = self.env['product.template'].search([('forcemanager_id', '=', str(fm_id))], limit=1)
             if not product_odoo:
                 # No existe en Odoo => BORRAR en FM
@@ -282,15 +291,10 @@ class OdooToForceManagerAPI(models.TransientModel):
                 )
                 continue
 
-            # Opcional: más comprobaciones...
-            # if not categ.forcemanager_id:
-            #     self._eliminar_producto_forcemanager(
-            #         fm_id,
-            #         reason="Categoría ya no tiene forcemanager_id"
-            #     )
-            #     continue
+            # (Opcional) Más comprobaciones, p.ej. si categ.forcemanager_id se perdió...
 
         _logger.info("[verificar_productos_forcemanager_sincronizados] Finalizada la verificación.")
+
 
 
     def _eliminar_producto_forcemanager(self, fm_id, reason=""):

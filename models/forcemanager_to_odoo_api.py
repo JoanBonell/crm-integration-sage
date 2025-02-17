@@ -239,6 +239,9 @@ class ForceManagerToOdooAPI(models.TransientModel):
             else:
                 _logger.info("[sync_accounts] Creando nuevo partner (FM ID=%s)", fm_id)
                 partner = self.env['res.partner'].with_context(sync_from_forcemanager=True).create(vals)
+                self._assign_tarifa_segun_provincia(partner, fm_acc.get('region') or "")
+                
+            
 
             # Y acto seguido, para marcarlo como sincronizado:
             partner.with_context(sync_from_forcemanager=True).write({'synced_with_forcemanager': True})
@@ -1139,6 +1142,9 @@ class ForceManagerToOdooAPI(models.TransientModel):
         nombre sea igual al del comercial asignado, se confirmará el pedido,
         se forzará la reserva y validación de los pickings (asignando en cada línea
         la cantidad planificada como realizada), y se generará y publicará la factura.
+        
+        Adicionalmente, si el comercial (order.user_id) tiene un correo en Odoo,
+        se envía la factura también a esa dirección.
         """
         order = self.env['sale.order'].browse(sale_id)
         if not order:
@@ -1183,14 +1189,14 @@ class ForceManagerToOdooAPI(models.TransientModel):
             _logger.error("Error al confirmar el pedido %s: %s", order.id, e)
 
         # 3) Forzar la validación de los pickings
-        for picking in order.picking_ids.filtered(lambda p: p.state not in ('done','cancel')):
+        for picking in order.picking_ids.filtered(lambda p: p.state not in ('done', 'cancel')):
             try:
                 # (3a) Forzamos la asignación (reservar stock), si está en estado 'confirmed' o 'waiting'
-                if picking.state in ('confirmed','waiting','assigned','partially_available'):
+                if picking.state in ('confirmed', 'waiting', 'assigned', 'partially_available'):
                     picking.action_assign()
 
                 # (3b) Asegurar que haya move_line_ids y poner qty_done:
-                for move in picking.move_ids.filtered(lambda m: m.state not in ('done','cancel')):
+                for move in picking.move_ids.filtered(lambda m: m.state not in ('done', 'cancel')):
                     planned_qty = move.product_uom_qty
 
                     if not move.move_line_ids:
@@ -1232,10 +1238,98 @@ class ForceManagerToOdooAPI(models.TransientModel):
                             if isinstance(invoice_ids, self.env['account.move'])
                             else self.env['account.move'].browse(invoice_ids))
                 # En Odoo 13+ confirmamos con action_post()
-                # (En Odoo <=12 era action_invoice_open())
                 invoices.action_post()
                 _logger.info("Factura(s) creada(s) y publicadas para el pedido %s.", order.id)
+
+                # ---------------- NUEVO: Enviar factura por correo al comercial ----------------
+                if order.user_id and order.user_id.email:
+                    mail_template = self.env.ref('sale.default_invoice_email_template', False)
+                    if mail_template:
+                        for inv in invoices:
+                            # Enviamos la factura con force_send=True
+                            mail_template.send_mail(
+                                inv.id,
+                                force_send=True,
+                                email_values={'email_to': order.user_id.email}
+                            )
+                            _logger.info(
+                                "Factura ID=%d enviada por email al comercial '%s' <%s>.",
+                                inv.id, order.user_id.name, order.user_id.email
+                            )
+                    else:
+                        _logger.warning(
+                            "No se encontró la plantilla 'sale.default_invoice_email_template'; "
+                            "no se puede enviar la factura por email al comercial."
+                        )
+                # ------------------------------------------------------------------------------
             else:
                 _logger.warning("No se generaron facturas para el pedido %s.", order.id)
         except Exception as e:
             _logger.error("Error al facturar el pedido %s: %s", order.id, e)
+
+            
+    def _assign_tarifa_segun_provincia(self, partner, fm_region):
+        """
+        Ajusta 'property_product_pricelist' del partner en función de la provincia (state_rec).
+        Lógica de ejemplo:
+        - Barcelona, Lleida, Girona, Tarragona => Tarifa que comience con '2'
+        - Islas Baleares => '3'
+        - Valencia => '4'
+        - Madrid => '5'
+        - Cualquier provincia de Andalucía => '6'
+        - Bilbao (o provincia del País Vasco) => '8'
+        - Coruña (o Galicia) => '9'
+        """
+        _logger.info("[_assign_tarifa_segun_provincia] Recibida provincia %s para cliente %s", fm_region, partner.id)
+        if not fm_region:
+            _logger.info("[_assign_tarifa_segun_provincia] No se asigna tarifa a cliente con ID = %s, ya que NO tiene provincia.", partner.id)
+            return  # Si no hay provincia, no hacemos nada
+
+        # Nombre de la provincia y/o región normalizado a minúsculas 
+        provincia_lower = fm_region.lower().strip()
+        
+
+
+        # Ejemplos de detección. Ajusta según los nombres que devuelva tu 'state_rec.name'
+        # o si preferirías usar un condicional con state_rec.code, etc.
+        # Ojo con "País Vasco" vs "Bilbao", "Galicia" vs "A Coruña", etc.
+        if provincia_lower in ('barcelona', 'girona', 'lleida', 'tarragona'):
+            numero = '2'
+        elif provincia_lower in ('illes balears', 'islas baleares'):
+            numero = '3'
+        elif provincia_lower == 'valencia':
+            numero = '4'
+        elif provincia_lower == 'madrid':
+            numero = '5'
+        elif provincia_lower in (
+            'sevilla', 'cádiz', 'huelva', 'córdoba', 'granada', 'jaén', 'almería', 'málaga',
+        ):
+            # Cualquier provincia de Andalucía => 6
+            numero = '6'
+        elif provincia_lower in ('vizcaya', 'guipúzcoa', 'álava', 'alava', 'bizkaia', 'gipuzkoa', 'bilbao'):
+            # Bilbao o cualquier provincia del País Vasco => 8
+            numero = '8'
+        elif provincia_lower in ('a coruña', 'coruña', 'lugo', 'ourense', 'pontevedra', 'galicia'):
+            # O Galicia => 9
+            numero = '9'
+        else:
+            # Si no encaja en nada, no asignamos nada
+            numero = None
+
+        
+        if numero:
+            # Buscar una tarifa (product.pricelist) cuyo 'name' empiece por ese número
+            pricelist = self.env['product.pricelist'].search(
+                [('name', 'like', f'{numero}%')],
+                limit=1
+            )
+            if pricelist:
+                partner.property_product_pricelist = pricelist
+                _logger.info("[_assign_tarifa_segun_provincia] Asignando tarifa con número %s: Cliente de provincia de %s, asignada tarifa %s", numero, provincia_lower, pricelist)
+            else:
+                _logger.error("[_assign_tarifa_segun_provincia] No se ha podido asignar tarifa a cliente debido a que no existe la tarifa para la región. En región %s debería tener una tarifa empezada con número %s", provincia_lower, numero)
+                
+                
+        
+            
+
