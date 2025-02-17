@@ -702,7 +702,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
         orders_updated = response_updated if isinstance(response_updated, list) else response_updated.get('results', [])
         orders_created = response_created if isinstance(response_created, list) else response_created.get('results', [])
         
-        # Unir resultados, evitando duplicados (clave: id de ForceManager)
+        # Unir resultados, evitando duplicados
         orders_union = {}
         for order in orders_updated + orders_created:
             fm_order_id = order.get('id')
@@ -715,7 +715,6 @@ class ForceManagerToOdooAPI(models.TransientModel):
         fm_order_list = list(orders_union.values())
         _logger.info("[sync_orders] Unión de pedidos: %d pedidos únicos", len(fm_order_list))
         
-        # Obtenemos también las líneas para cada pedido (consulta basada en la misma fecha)
         lines_dict = self._fetch_salesorder_lines_since(date_str)
         
         for fm_order in fm_order_list:
@@ -727,7 +726,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
             except ValueError:
                 fm_id_int = 0
             
-            # Si el pedido está marcado como 'deleted', lo cancelamos en Odoo
+            # Si el pedido está "deleted", lo cancelamos en Odoo
             is_deleted = fm_order.get('deleted') is True
             date_deleted = fm_order.get('dateDeleted')
             if is_deleted or date_deleted:
@@ -743,7 +742,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
             if fm_date_str:
                 date_order = self._parse_fm_datetime(fm_date_str)
             
-            # Buscar el partner (la cuenta)
+            # Buscar partner
             partner_id = False
             fm_acc = fm_order.get('accountId')
             if fm_acc and fm_acc.get('id'):
@@ -760,13 +759,13 @@ class ForceManagerToOdooAPI(models.TransientModel):
             
             if not partner_id:
                 _logger.error(
-                    "[sync_orders] No se encuentra partner with forcemanager_id=%s. "
-                    "Omitimos creación de pedido (FM ID=%s).",
+                    "[sync_orders] No se encuentra partner con forcemanager_id=%s; "
+                    "no creamos pedido (FM ID=%s).",
                     fm_acc.get('id'), fm_id_int
                 )
                 continue
 
-            # Moneda
+            # Moneda, comercial, x_entrega, etc.
             currency_id = False
             currency_name = fm_order.get('currencyId', {}).get('value')
             if currency_name:
@@ -774,7 +773,6 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 if cobj:
                     currency_id = cobj.id
             
-            # Comercial
             user_id = False
             fm_salesrep = fm_order.get('salesRepId')
             if fm_salesrep and fm_salesrep.get('value'):
@@ -782,17 +780,14 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 uobj = self.env['res.users'].search([('name', '=', rep_name)], limit=1)
                 if uobj:
                     user_id = uobj.id
-            
-            # Procesar Z_Entrega_mismo_comercial: se espera que venga como diccionario con un campo 'value'
+
             fm_entrega = fm_order.get('Z_Entrega_mismo_comercial')
-            _logger.info("[sync_orders] El valor de fm_entrega es %s", fm_entrega)
             if isinstance(fm_entrega, dict):
                 value_entrega = fm_entrega.get('value', '').strip().lower()
             elif isinstance(fm_entrega, str):
                 value_entrega = fm_entrega.strip().lower()
             else:
                 value_entrega = ''
-            _logger.info("[sync_orders] El valor procesado de entrega es %s", value_entrega)
             if value_entrega == "si":
                 x_entrega = 'si'
             elif value_entrega == "no":
@@ -800,12 +795,9 @@ class ForceManagerToOdooAPI(models.TransientModel):
             else:
                 x_entrega = False
 
-
-            # Referencia y status
             fm_reference = fm_order.get('reference') or ""
             fm_status = fm_order.get('status') or ""
-            
-            # Montar los vals para sale.order
+
             vals_order = {
                 'forcemanager_id': fm_id_int,
                 'partner_id': partner_id,
@@ -819,11 +811,14 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'client_order_ref': fm_reference,
             }
             
+            # --- Aquí detectamos nuevo pedido vs existente ---
             order = self.env['sale.order'].search([('forcemanager_id', '=', fm_id_int)], limit=1)
             if order:
+                is_new_order = False
                 _logger.info("[sync_orders] Actualizando pedido %d (FM ID=%s)", order.id, fm_id_int)
                 order.write(vals_order)
             else:
+                is_new_order = True
                 _logger.info("[sync_orders] Creando nuevo sale.order (FM ID=%s)", fm_id_int)
                 order = self.env['sale.order'].with_context(
                     mail_create_nosubscribe=True,
@@ -831,20 +826,19 @@ class ForceManagerToOdooAPI(models.TransientModel):
                     mail_activity_automation_skip=True,
                     tracking_disable=True
                 ).create(vals_order)
-            
-            # Sincronizar líneas
+
+            # Llamada a _sync_order_lines con is_new_order
             fm_lines = lines_dict.get(fm_id_int, [])
-            self._sync_order_lines(order, fm_lines)
+            self._sync_order_lines(order, fm_lines, is_new_order=is_new_order)
+
+            # Entrega por comercial
             if order.x_entrega_mismo_comercial == 'si':
                 self.if_is_deliveredbycomercial(order.id)
             else:
-                # Si NO entrega el comercial => confirmamos directamente
+                # Si NO entrega el comercial => confirmación directa
                 if order.state not in ('sale', 'done', 'cancel'):
-                    # Confirmar con envío de correo
                     order.with_context(send_email=True).action_confirm()
-                    
 
-            
             order.synced_with_forcemanager = True
             _logger.info("[sync_orders] sale.order.id=%d procesado con éxito.", order.id)
         
@@ -852,11 +846,18 @@ class ForceManagerToOdooAPI(models.TransientModel):
         _logger.info("<<< [sync_orders] Finalizada la sincronización de pedidos.")
 
 
-    def _sync_order_lines(self, order, fm_lines):
+
+    def _sync_order_lines(self, order, fm_lines, is_new_order=False):
         """
         Crea/actualiza líneas del pedido usando el forcemanager_id del producto.
-        Si el pedido ya está confirmado (state='sale' o 'done') o cancelado (state='cancel'),
-        NO se toca ninguna línea.
+        - is_new_order: True si estamos CREANDO el pedido, False si solo lo estamos actualizando.
+
+        Lógica:
+        - Si `is_new_order` es True, comparamos el price de ForceManager (fm_price)
+        con el list_price base del producto.
+        * Si difieren, forzamos el price_unit = fm_price.
+        * Si NO difieren, dejamos price_unit=False para que la tarifaprice se aplique en Odoo.
+        - Si no es pedido nuevo, dejamos price_unit=False y que la lógica normal de Odoo aplique.
         """
         if order.state in ('sale', 'done', 'cancel'):
             _logger.info(
@@ -868,22 +869,20 @@ class ForceManagerToOdooAPI(models.TransientModel):
         _logger.info("[_sync_order_lines] Eliminando líneas previas del pedido %d ...", order.id)
         order.order_line.unlink()
 
-        # 1) Verificamos la tarifa del partner
+        # Detectar si la 'tarifa' del partner empieza por dígito
         pricelist = order.partner_id.property_product_pricelist
         pricelist_name = pricelist.name if pricelist else ""
-        # Comprobar si *no* empieza por dígito
-        # Ejemplo sencillo: si la primera letra NO es un dígito => usaremos precio de ForceManager
+        # Por defecto, asumimos "usar_precio_fm = True" si la tarifa no empieza por dígito
         usar_precio_fm = True
         if pricelist_name and pricelist_name[0].isdigit():
             usar_precio_fm = False
 
         _logger.info(
-            "[_sync_order_lines] Procesando %d líneas para el pedido FM ID=%s (tarifa=%s, usar_precio_fm=%s)...",
-            len(fm_lines), order.forcemanager_id, pricelist_name, usar_precio_fm
+            "[_sync_order_lines] Procesando %d líneas para el pedido FM ID=%s (tarifa=%s, usar_precio_fm=%s, is_new_order=%s)...",
+            len(fm_lines), order.forcemanager_id, pricelist_name, usar_precio_fm, is_new_order
         )
 
         for i, line_data in enumerate(fm_lines, start=1):
-            # Extraer productId
             fm_prod = line_data.get('productId')
             if isinstance(fm_prod, dict):
                 fm_prod_id = fm_prod.get('id')
@@ -891,7 +890,8 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 fm_prod_id = fm_prod
 
             product_rec = self.env['product.product'].search(
-                [('forcemanager_id', '=', fm_prod_id)], limit=1
+                [('forcemanager_id', '=', fm_prod_id)],
+                limit=1
             )
             if not product_rec:
                 _logger.warning(
@@ -901,16 +901,46 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 continue
 
             qty = line_data.get('quantity', 1)
-            description = line_data.get('productName') or product_rec.name or "Línea sin producto"
+            fm_price = line_data.get('price', 0.0)
+            description = line_data.get('productName') or product_rec.name or "(Sin descripción)"
 
-            # 2) Si la tarifa no empieza por dígito, forzamos el price_unit con el que venga de ForceManager
-            # (puede que FM devuelva 'price' o 'price_unit', ajusta según tu JSON)
-            fm_price = line_data.get('price', 0.0)  
-            price_unit = fm_price if usar_precio_fm else False
+            # 1) Determinar price_unit
+            #    - Por defecto: price_unit = False => Odoo calcula según pricelist
+            #    - Solo si la FM ha modificado el precio, forzamos fm_price
+            price_unit = False  # Dejar que Odoo calcule por tarifa
+
+            # Solo en pedidos nuevos, comparamos con el list_price
+            if is_new_order:
+                # El price base del producto
+                base_price = product_rec.list_price
+                if not self._float_is_equal(base_price, fm_price):
+                    # => ForceManager lo cambió => forzamos fm_price
+                    price_unit = fm_price
+                    _logger.info(
+                        "  (Pedido nuevo) Forzamos price_unit=%s. [list_price=%s, FM=%s]",
+                        fm_price, base_price, fm_price
+                    )
+                else:
+                    _logger.info(
+                        "  (Pedido nuevo) FM price %s == list_price %s => usaremos la tarifa Odoo (price_unit=False)",
+                        fm_price, base_price
+                    )
+            else:
+                # (Si no es un pedido nuevo, ya no forzamos nada,
+                #  quedándose price_unit=False => Odoo usa su LPP)
+                pass
+
+            # Si la tarifa no empieza por dígito => en teoría se podría forzar fm_price
+            # Pero ya tenemos la condición "is_new_order" + "diferencia"
+            # => con 'usar_precio_fm' podrías anularlo si quieres.
+            if not usar_precio_fm:
+                # forzar price_unit = False => Odoo calcula
+                # Nota: Ajusta según tu criterio. 
+                price_unit = False
 
             _logger.info(
-                "  Línea #%d => productName='%s', cantidad=%s, price_unit=%s (tarifa sin dígito? %s)",
-                i, description, qty, fm_price, usar_precio_fm
+                "  Línea #%d => productName='%s', qty=%s, fm_price=%s => price_unit=%s",
+                i, description, qty, fm_price, price_unit
             )
 
             line_vals = {
@@ -919,7 +949,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 'product_uom_qty': qty,
                 'name': description,
             }
-            if usar_precio_fm:
+            if price_unit is not False:
                 line_vals['price_unit'] = price_unit
 
             new_line = self.env['sale.order.line'].create(line_vals)
@@ -932,6 +962,27 @@ class ForceManagerToOdooAPI(models.TransientModel):
 
 
 
+    def _get_price_from_pricelist(self, pricelist, product, qty, partner):
+        """
+        Dado un pricelist y un product, devuelve el precio calculado
+        usando 'price_get'. Si la pricelist es nula, devolvemos el list_price.
+        """
+        if not pricelist:
+            return product.list_price
+
+        # price_get() retorna un dict: {pricelist_id: price} 
+        # Ajustar context si deseas controlar la fecha, UoM, etc.
+        price_dict = pricelist.with_context(uom=product.uom_id.id).price_get(
+            product.id,
+            qty or 1.0,
+            partner.id
+        )
+        # Sacamos el valor para pricelist.id
+        return price_dict.get(pricelist.id, product.list_price)
+
+        
+    def _float_is_equal(self, val1, val2, precision_digits=2):
+        return round(val1 - val2, precision_digits) == 0
 
         
     def _fetch_salesorder_lines_since(self, date_updated_str):
