@@ -1,24 +1,28 @@
 <odoo>
     <data noupdate="1">
-        <!-- ForceManager → Odoo cada hora -->
+        <!-- ForceManager → Odoo cada 3 minutos -->
         <record id="ir_cron_forcemanager_to_odoo" model="ir.cron">
             <field name="name">ForceManager to Odoo Sync</field>
             <field name="model_id" ref="model_forcemanager_to_odoo"/>
             <field name="state">code</field>
             <field name="code">model.action_sync_from_forcemanager()</field>
-            <field name="interval_type">hours</field>
-            <field name="interval_number">1</field>
+            <field name="interval_type">minutes</field>
+            <field name="interval_number">3</field>
+            <!-- Establece la primera ejecución, por ejemplo, a las 10:00:00 -->
+            <field name="nextcall" eval="(DateTime.now() + relativedelta(minutes=0)).strftime('%Y-%m-%d %H:%M:%S')"/>
             <field name="active">True</field>
         </record>
 
-        <!-- Odoo → ForceManager cada 2 horas -->
+        <!-- Odoo → ForceManager cada 3 minutos, escalonada -->
         <record id="ir_cron_odoo_to_forcemanager" model="ir.cron">
             <field name="name">Odoo to ForceManager Sync</field>
             <field name="model_id" ref="model_odoo_to_forcemanager"/>
             <field name="state">code</field>
             <field name="code">model.action_sync_to_forcemanager()</field>
-            <field name="interval_type">hours</field>
-            <field name="interval_number">2</field>
+            <field name="interval_type">minutes</field>
+            <field name="interval_number">3</field>
+            <!-- Establece la primera ejecución unos segundos más tarde, por ejemplo, a las 10:01:30 -->
+            <field name="nextcall" eval="(DateTime.now() + relativedelta(minutes=1, seconds=30)).strftime('%Y-%m-%d %H:%M:%S')"/>
             <field name="active">True</field>
         </record>
     </data>
