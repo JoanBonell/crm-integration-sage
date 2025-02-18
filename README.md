@@ -13,8 +13,8 @@ Tras instalar el módulo:
    - `forcemanager_integration.private_key` = ``
    - `forcemanager_integration.base_url` (opcional, por defecto `https://api.forcemanager.net`).
 3. Activa los **cron jobs** (Programados) si quieres sincronizar de forma automática.
-   - "ForceManager to Odoo Sync" (cada hora)
-   - "Odoo to ForceManager Sync" (cada 2 horas)
+   - "ForceManager to Odoo Sync" 
+   - "Odoo to ForceManager Sync" 
 
 ## Uso
 
