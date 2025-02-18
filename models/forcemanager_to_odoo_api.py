@@ -883,6 +883,7 @@ class ForceManagerToOdooAPI(models.TransientModel):
         )
 
         for i, line_data in enumerate(fm_lines, start=1):
+            fm_line_id = line_data.get('id')
             fm_prod = line_data.get('productId')
             if isinstance(fm_prod, dict):
                 fm_prod_id = fm_prod.get('id')
@@ -953,6 +954,12 @@ class ForceManagerToOdooAPI(models.TransientModel):
                 line_vals['price_unit'] = price_unit
 
             new_line = self.env['sale.order.line'].create(line_vals)
+            # TODO: Siguiente actualización, añadir campo ForceManager_Line_ID
+            if fm_line_id:
+                new_line.forcemanager_line_id = str(fm_line_id)
+                _logger.info("  Línea #%d => forcemanager_line_id asignado: %s", i, new_line.forcemanager_line_id)
+            else:
+                _logger.info("  Línea #%d => No se encontró forcemanager_line_id en FM.", i)
             _logger.info(
                 "  Línea #%d => Creada sale.order.line ID=%d para order_id=%d",
                 i, new_line.id, order.id

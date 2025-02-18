@@ -17,9 +17,10 @@ class ProductCategory(models.Model):
     def sync_categories_to_forcemanager_on_init(self):
         _logger.info("[sync_categories_to_forcemanager_on_init] INICIO")
 
-        # 1) OBTENER las categorías en ForceManager
+        # 1) OBTENER las categorías en ForceManager filtrando por deleted = 'false'
+        where_clause = f"(deleted = 'false' OR deleted = 'False')"
         fm_categories = self.env['forcemanager.api']._perform_request(
-            'productCategories',
+            f'productCategories?where={where_clause}',
             method='GET'
         )
         if not fm_categories:

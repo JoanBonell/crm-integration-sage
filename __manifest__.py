@@ -1,11 +1,14 @@
 {
-    'name': 'ForceManager Integration v2',
-    'version': '15.0.1.0.0',
+    'name': 'Sage Sales CRM Integration',
+    'version': '1.0.0.0',
     'category': 'Sales/CRM',
-    'summary': 'Integración bidireccional con ForceManager',
+    'summary': 'Integración con Sage Sales Management',
     'description': """
-Este módulo integra Odoo con ForceManager, leyendo claves desde
-'ir.config_parameter' en lugar de dotenv.
+    Este módulo integra Sage Sales CRM con Odoo. Para usarlo debemos configurar las claves de API dentro de Ajustes -> Técnico -> Parámetros del Sistema.
+    En este punto, añadir:
+    forcemanager_integration.public_key = ``
+    forcemanager_integration.private_key = ``
+    forcemanager_integration.base_url (opcional, por defecto https://api.forcemanager.net). 
     """,
     'author': 'Joan Bonell Ruiz',
     'maintainer': 'Joan Bonell Ruiz',

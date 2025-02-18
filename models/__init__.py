@@ -11,3 +11,4 @@ from . import product_category_extension
 from . import forcemanager_import
 from . import stock_move
 from . import product_template
+from . import sale_order_line
